@@ -20,7 +20,7 @@
 (if (version< emacs-version "25.0") (progn (require 'saveplace) (setq-default save-place t)) (save-place-mode 1))
 
 ; delete trailing whitespaces
-(add-hook 'before-save-hook '(lambda() (when (not (or (derived-mode-p 'markdown-mode))) (delete-trailing-whitespace))))
+;(add-hook 'before-save-hook '(lambda() (when (not (or (derived-mode-p 'markdown-mode))) (delete-trailing-whitespace))))
 
 ; find file at position
 (ffap-bindings)
