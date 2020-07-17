@@ -1,0 +1,16 @@
+; run via: emacs -q --script ./install.el
+(cua-mode t)
+(require 'package)
+(package-initialize)
+;insecure but might be needed on some environments
+;(setq package-check-signature nil)
+(add-to-list 'package-archives '("melpa" . "https://melpa.org/packages/"))
+(package-refresh-contents)
+(package-install 'gnu-elpa-keyring-update)
+(package-install 'company)
+(package-install 'racer)
+(package-install 'rust-mode)
+(package-install 'flycheck)
+(package-install 'flycheck-rust)
+(package-install 'yaml-mode)
+(kill-emacs)

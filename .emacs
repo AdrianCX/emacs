@@ -172,7 +172,7 @@
   "load a cscope.files file."
   (interactive "fpath to src: ")
   (setq ido-virtual-buffers '())
-  (setq recentf-list '())
+  ;(setq recentf-list '())
   (setq src-path source-path)
   (setq src-files (concat src-path "cscope.files"))
   (setq cscope-file-list (split-string (slurp src-files)))
