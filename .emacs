@@ -57,6 +57,16 @@
 
 (global-set-key (kbd "C-x f") 'put-file-name-on-clipboard)
 
+; Get /path/to/filename in clipboard                                                                                                                                                                                                     
+(defun put-debug-file-name-on-clipboard ()
+  "Put the current file name on the clipboard"
+(interactive)
+  (insert (concat "println!(\"" (buffer-file-name (window-buffer (minibuffer-selected-window))) ":" (number-to-string (line-number-at-pos)) "\");"))
+  (indent-region))
+
+(global-set-key (kbd "C-x ,") 'put-debug-file-name-on-clipboard)
+
+
 ; Highlight fun
 (global-set-key (kbd "C-x ;") 'highlight-symbol-at-point)
 (global-set-key (kbd "C-x '") 'unhighlight-regexp)
@@ -187,6 +197,7 @@
 
 (recentf-mode 1)
 (setq recentf-max-menu-items 1000)
+(setq recentf-max-saved-items 1000)
 
 (defun ido-choose-from-recentf ()
   "Use ido to select a recently visited file from the `recentf-list'"
