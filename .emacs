@@ -15,12 +15,14 @@
 (tool-bar-mode -1)
 (transient-mark-mode 1)
 (delete-selection-mode 1)
+(setq require-final-newline nil)
+(setq mode-require-final-newline nil)
 
 ;; remember cursor position
 (if (version< emacs-version "25.0") (progn (require 'saveplace) (setq-default save-place t)) (save-place-mode 1))
 
 ; delete trailing whitespaces
-;(add-hook 'before-save-hook '(lambda() (when (not (or (derived-mode-p 'markdown-mode))) (delete-trailing-whitespace))))
+(add-hook 'before-save-hook '(lambda() (when (not (or (derived-mode-p 'markdown-mode))) (delete-trailing-whitespace))))
 
 ; find file at position
 (ffap-bindings)
@@ -50,14 +52,17 @@
 (defun put-file-name-on-clipboard ()
   "Put the current file name on the clipboard"
   (interactive)
-  (let ((filename (if (equal major-mode 'dired-mode) default-directory (buffer-file-name))))
+  (let ((filename (if (equal major-mode 'dired-mode)
+                      default-directory
+                    (concat (buffer-file-name (window-buffer (minibuffer-selected-window))) ":" (number-to-string (line-number-at-pos))))))
     (when filename
-      (with-temp-buffer (insert filename) (clipboard-kill-region (point-min) (point-max)))
-      (message filename))))
+      (kill-new filename)
+      (message "%s" filename))))
+
 
 (global-set-key (kbd "C-x f") 'put-file-name-on-clipboard)
 
-; Get /path/to/filename in clipboard                                                                                                                                                                                                     
+; Get /path/to/filename in clipboard
 (defun put-debug-file-name-on-clipboard ()
   "Put the current file name on the clipboard"
 (interactive)
@@ -194,6 +199,12 @@
 (require 'ido)
 (ido-mode 'buffers) ;; only use this line to turn off ido for file names!
 (setq ido-ignore-buffers '("^ " "*Completions*" "*Shell Command Output*" "*Messages*" "Async Shell Command"))
+
+(defun clear-recentf ()
+  "Clear recentf"
+  (interactive)
+  (setq recentf-list '()))
+
 
 (recentf-mode 1)
 (setq recentf-max-menu-items 1000)
