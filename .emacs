@@ -17,6 +17,7 @@
 (delete-selection-mode 1)
 (setq require-final-newline nil)
 (setq mode-require-final-newline nil)
+(set-default-coding-systems 'utf-8)
 
 ;; remember cursor position
 (if (version< emacs-version "25.0") (progn (require 'saveplace) (setq-default save-place t)) (save-place-mode 1))
@@ -197,6 +198,7 @@
 
 ; Code browsing via ido - C-w - load list of project files
 (require 'ido)
+(setq ido-enable-flex-matching t)
 (ido-mode 'buffers) ;; only use this line to turn off ido for file names!
 (setq ido-ignore-buffers '("^ " "*Completions*" "*Shell Command Output*" "*Messages*" "Async Shell Command"))
 
