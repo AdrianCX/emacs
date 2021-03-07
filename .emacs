@@ -11,7 +11,7 @@
 (setq ring-bell-function 'ignore)
 (setq-default indent-tabs-mode nil)
 (setq-default truncate-lines t)
-(toggle-scroll-bar -1)
+;(toggle-scroll-bar -1)
 (tool-bar-mode -1)
 (transient-mark-mode 1)
 (delete-selection-mode 1)
@@ -169,8 +169,8 @@
 (setq tramp-default-method "ssh")
 
 ; Fix X11 copy paste
-(require 'xclip)
-(xclip-mode 1)
+;(require 'xclip)
+;(xclip-mode 1)
 
 ; code browsing
 (require 'xcscope)
