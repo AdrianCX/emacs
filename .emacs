@@ -12,7 +12,7 @@
 (setq-default indent-tabs-mode nil)
 (setq-default truncate-lines t)
 ;(toggle-scroll-bar -1)
-(tool-bar-mode -1)
+;(tool-bar-mode -1)
 (transient-mark-mode 1)
 (delete-selection-mode 1)
 (setq require-final-newline nil)
@@ -23,7 +23,7 @@
 (if (version< emacs-version "25.0") (progn (require 'saveplace) (setq-default save-place t)) (save-place-mode 1))
 
 ; delete trailing whitespaces
-(add-hook 'before-save-hook '(lambda() (when (not (or (derived-mode-p 'markdown-mode))) (delete-trailing-whitespace))))
+;(add-hook 'before-save-hook '(lambda() (when (not (or (derived-mode-p 'markdown-mode))) (delete-trailing-whitespace))))
 
 ; find file at position
 (ffap-bindings)
@@ -169,8 +169,8 @@
 (setq tramp-default-method "ssh")
 
 ; Fix X11 copy paste
-;(require 'xclip)
-;(xclip-mode 1)
+(require 'xclip)
+(xclip-mode 1)
 
 ; code browsing
 (require 'xcscope)

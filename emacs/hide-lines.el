@@ -52,7 +52,7 @@
 ;; match the specified regexp. If you want to reveal previously hidden
 ;; lines you can use any other prefix, e.g. C-u C-u C-c /
 ;; 
-(require 'cscope)
+(require 'xcscope)
 
 
 ;;; Commands:
