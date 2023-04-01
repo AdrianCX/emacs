@@ -173,6 +173,7 @@
 (xclip-mode 1)
 
 ; code browsing
+(require 'cscope)
 (require 'xcscope)
 (define-key global-map [(control f5)]  'cscope-find-this-symbol)
 (setq cscope-option-use-inverted-index t)
@@ -236,30 +237,49 @@
 
 (defvar hide-mode nil "hide matching or not")
 (defvar hide-lines-column nil "column for hide-lines")
-(defvar hide-lines-text nil "text for hide-lines")
+(defvar hide-lines-text "" "text for hide-lines")
 
 (defun get-selected-text ()
   (when (region-active-p)
     (let (deactivate-mark)
       (buffer-substring (region-beginning) (region-end)))))
 
-(defun hide-not-matching ()
+(setq debug-on-error t)
+
+(defun reload-init-file ()
   (interactive)
+  (load-file user-init-file))
+
+(global-set-key (kbd "C-c C-l") 'reload-init-file)    ; Reload .emacs file
+
+(defun hide-function (func)
   (setq hide-mode nil)
   (setq hide-lines-column (current-column))
-  (setq hide-lines-text (get-selected-text))
-  (hide-lines-not-matching hide-lines-text)
-  (move-to-column hide-lines-column t)
-  (keyboard-quit))
+
+  (let ((selected-text (get-selected-text)))
+    (progn
+      (if (and selected-text (not (string= "" selected-text)))
+          (setq hide-lines-text selected-text)))
+    )
+  (if (or (not hide-lines-text) (string= "" hide-lines-text))
+      (setq hide-lines-text (read-string "hide-not-matching:")))
+
+  (if (not (string= "" hide-lines-text))
+      (progn
+        (funcall func hide-lines-text)
+        (move-to-column hide-lines-column t)
+        (keyboard-quit)
+        )
+    )
+  )
+
+(defun hide-not-matching ()
+  (interactive)
+  (hide-function 'hide-lines-not-matching))
 
 (defun hide-matching ()
   (interactive)
-  (setq hide-mode t)
-  (setq hide-lines-column (save-excursion (goto-char (region-beginning)) (current-column)))
-  (setq hide-lines-text (get-selected-text))
-  (hide-lines-matching hide-lines-text)
-  (move-to-column hide-lines-column t)
-  (keyboard-quit))
+  (hide-function 'hide-lines-matching))
 
 (defun rehide-lines ()
   (interactive)
@@ -271,11 +291,10 @@
 
 (global-set-key (kbd "C-,") 'hide-not-matching)
 (global-set-key (kbd "C-.") 'hide-matching)
+;(global-set-key (kbd "M-<left>") 'hide-not-matching)
+;(global-set-key (kbd "M-<right>") 'hide-matching)
+(global-set-key (kbd "M-<up>") 'hide-not-matching)
 (global-set-key (kbd "M-<down>") 'hide-lines-show-all)
-(global-set-key (kbd "M-<up>") 'rehide-lines)
-(global-set-key (kbd "M-<up>") 'hide-lines-not-matching-ni)
-(global-set-key (kbd "M-<down>") 'hide-lines-show-all)
-
 
 ; Customization per project
 
@@ -294,4 +313,5 @@
 ;(defun app-compile()
 ;  "Simplify workflow"
 ;  (interactive)
-;  (setq compile-command "cd /path/to/proj/ && compile"))
+                                        ;  (setq compile-command "cd /path/to/proj/ && compile"))
+
