@@ -233,68 +233,7 @@
 (global-set-key (kbd "M-w") 'ido-choose-from-cscope)
 
 ; Useful when going through lots of logs - hide lines matching regex, not matching regex, etc.
-(require 'hide-lines)
 
-(defvar hide-mode nil "hide matching or not")
-(defvar hide-lines-column nil "column for hide-lines")
-(defvar hide-lines-text "" "text for hide-lines")
-
-(defun get-selected-text ()
-  (when (region-active-p)
-    (let (deactivate-mark)
-      (buffer-substring (region-beginning) (region-end)))))
-
-(setq debug-on-error t)
-
-(defun reload-init-file ()
-  (interactive)
-  (load-file user-init-file))
-
-(global-set-key (kbd "C-c C-l") 'reload-init-file)    ; Reload .emacs file
-
-(defun hide-function (func)
-  (setq hide-mode nil)
-  (setq hide-lines-column (current-column))
-
-  (let ((selected-text (get-selected-text)))
-    (progn
-      (if (and selected-text (not (string= "" selected-text)))
-          (setq hide-lines-text selected-text)))
-    )
-  (if (or (not hide-lines-text) (string= "" hide-lines-text))
-      (setq hide-lines-text (read-string "hide-not-matching:")))
-
-  (if (not (string= "" hide-lines-text))
-      (progn
-        (funcall func hide-lines-text)
-        (move-to-column hide-lines-column t)
-        (keyboard-quit)
-        )
-    )
-  )
-
-(defun hide-not-matching ()
-  (interactive)
-  (hide-function 'hide-lines-not-matching))
-
-(defun hide-matching ()
-  (interactive)
-  (hide-function 'hide-lines-matching))
-
-(defun rehide-lines ()
-  (interactive)
-  (if hide-mode
-      (hide-lines-matching hide-lines-text)
-    (hide-lines-not-matching hide-lines-text))
-  (move-to-column hide-lines-column t)
-  (keyboard-quit))
-
-(global-set-key (kbd "C-,") 'hide-not-matching)
-(global-set-key (kbd "C-.") 'hide-matching)
-;(global-set-key (kbd "M-<left>") 'hide-not-matching)
-;(global-set-key (kbd "M-<right>") 'hide-matching)
-(global-set-key (kbd "M-<up>") 'hide-not-matching)
-(global-set-key (kbd "M-<down>") 'hide-lines-show-all)
 
 ; Customization per project
 
@@ -313,5 +252,17 @@
 ;(defun app-compile()
 ;  "Simplify workflow"
 ;  (interactive)
-                                        ;  (setq compile-command "cd /path/to/proj/ && compile"))
+;  (setq compile-command "cd /path/to/proj/ && compile"))
+
+
+(require 'hide)
+
+(setq debug-on-error t)
+
+(defun reload-init-file ()
+  (interactive)
+  (load-file user-init-file))
+
+(global-set-key (kbd "C-c C-l") 'reload-init-file)    ; Reload .emacs file
+
 
