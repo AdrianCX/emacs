@@ -169,11 +169,11 @@
 (setq tramp-default-method "ssh")
 
 ; Fix X11 copy paste
-(require 'xclip)
-(xclip-mode 1)
+;(require 'xclip)
+;(xclip-mode 1)
 
 ; code browsing
-(require 'cscope)
+;(require 'cscope)
 (require 'xcscope)
 (define-key global-map [(control f5)]  'cscope-find-this-symbol)
 (setq cscope-option-use-inverted-index t)
@@ -257,7 +257,7 @@
 
 (require 'hide)
 
-(setq debug-on-error t)
+;(setq debug-on-error t)
 
 (defun reload-init-file ()
   (interactive)
