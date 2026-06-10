@@ -178,6 +178,73 @@
 (define-key global-map [(control f5)]  'cscope-find-this-symbol)
 (setq cscope-option-use-inverted-index t)
 
+;; ---------------------------------------------------------------------------
+;; C/C++ code indexing via Universal Ctags, restricted to cscope.files
+;;
+;; Run `load-project' (C-d) first to point at the project root; that sets
+;; `src-path' / `src-files' from your cscope.files.  Everything below indexes
+;; and searches ONLY the files listed in cscope.files -- no recursion, no git.
+;;
+;;   Jump to definition : M-.   (xref-find-definitions, uses TAGS)
+;;   Jump back          : M-,   (xref-go-back)
+;;   Find references    : C-c r (grep over the files in cscope.files)
+;;   Find file          : C-w   (existing ido-choose-from-cscope)
+;;   (Re)build the index: C-c t
+;; ---------------------------------------------------------------------------
+
+(setq tags-revert-without-query t)       ; reload TAGS silently after a rebuild
+(setq tags-add-tables nil)               ; switch tables instead of stacking them
+(setq large-file-warning-threshold nil)  ; don't prompt when a big TAGS loads
+
+(defun ctags--require-project ()
+  "Ensure `load-project' (C-d) has been run; return the project root."
+  (unless (and src-path src-files (file-exists-p src-files))
+    (user-error "Run load-project (C-d) first to select a cscope.files"))
+  (file-name-as-directory (expand-file-name src-path)))
+
+(defun ctags-build ()
+  "Build an Emacs TAGS index from the files listed in cscope.files, and load it.
+Only those files are parsed -- ctags is given the list via `-L'."
+  (interactive)
+  (let ((default-directory (ctags--require-project)))
+    (message "Building TAGS from %s ..." src-files)
+    (call-process "ctags" nil "*ctags*" nil
+                  "-e"
+                  "--languages=C,C++"
+                  "--extras=+q"          ; also index qualified names (Class::member)
+                  "--fields=+n"
+                  "-L" (expand-file-name src-files))
+    (visit-tags-table (expand-file-name "TAGS" default-directory))
+    (message "TAGS ready: %sTAGS" default-directory)))
+
+(defun ctags-find-references (symbol)
+  "Grep for SYMBOL across only the files listed in cscope.files."
+  (interactive
+   (list (read-string "Find references: " (thing-at-point 'symbol t))))
+  (let ((default-directory (ctags--require-project)))
+    (grep (format "cat %s | xargs grep --color=auto -nH -e %s"
+                  (shell-quote-argument (expand-file-name src-files))
+                  (shell-quote-argument symbol)))))
+
+(defun ctags-search (pattern)
+  "Free-text/regexp search for PATTERN across the indexed files.
+Greps the same file list the TAGS db is built from (cscope.files) and
+shows clickable hits in a grep buffer.  Unlike `ctags-find-references',
+PATTERN is treated as an extended regexp, not a literal symbol."
+  (interactive
+   (list (read-string "Search files: " (thing-at-point 'symbol t))))
+  (let ((default-directory (ctags--require-project)))
+    (grep (format "cat %s | xargs grep --color=auto -nHE -e %s"
+                  (shell-quote-argument (expand-file-name src-files))
+                  (shell-quote-argument pattern)))))
+
+(global-set-key (kbd "C-c t") 'ctags-build)
+(global-set-key (kbd "C-c r") 'ctags-find-references)
+(global-set-key (kbd "C-c s") 'ctags-search)
+;; `tags-search' walks the files recorded in the loaded TAGS db directly;
+;; `M-0 M-,' (fileloop-continue) jumps to the next match after the first.
+(global-set-key (kbd "C-c S") 'tags-search)
+
 ;; quick helpers to load project files
 (defvar src-path nil "path source code")
 (defvar src-files nil "list of cscope files")
