@@ -262,7 +262,14 @@ PATTERN is treated as an extended regexp, not a literal symbol."
   (setq cscope-file-list (split-string (slurp src-files)))
   (cscope-set-initial-directory src-path)
   (grep-compute-defaults)
-  (grep-apply-setting 'grep-command (concat (concat "grep -nr "))))
+  (grep-apply-setting 'grep-command (concat (concat "grep -nr ")))
+  ;; Load an existing TAGS index (built earlier with C-c t) without rebuilding.
+  (let ((tags-file (expand-file-name "TAGS" src-path)))
+    (if (file-exists-p tags-file)
+        (progn
+          (visit-tags-table tags-file)
+          (message "Loaded TAGS: %s" tags-file))
+      (message "No TAGS at %s -- run ctags-build (C-c t) to create one" tags-file))))
 
 ; Code browsing via ido - C-w - load list of project files
 (require 'ido)
