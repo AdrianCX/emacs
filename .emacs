@@ -185,11 +185,21 @@
 ;; `src-path' / `src-files' from your cscope.files.  Everything below indexes
 ;; and searches ONLY the files listed in cscope.files -- no recursion, no git.
 ;;
+;; Two indexes are kept side by side in the project root:
+;;   TAGS                 -- ctags definition db, used for jump-to-definition
+;;   cscope_archive.txt.gz -- every source file concatenated + gzipped, plus a
+;;                            line->file lookup (cscope_archive.idx).  References
+;;                            and free-text searches `zgrep' this one archive
+;;                            instead of grepping hundreds of separate files, and
+;;                            cscope_archive.py maps each hit back to file:line.
+;; `C-c t' rebuilds BOTH.
+;;
 ;;   Jump to definition : M-.   (xref-find-definitions, uses TAGS)
 ;;   Jump back          : M-,   (xref-go-back)
-;;   Find references    : C-c r (grep over the files in cscope.files)
+;;   Find references    : C-c r (literal zgrep over the gzipped archive)
+;;   Free-text search   : C-c s (regexp zgrep over the gzipped archive)
 ;;   Find file          : C-w   (existing ido-choose-from-cscope)
-;;   (Re)build the index: C-c t
+;;   (Re)build indexes  : C-c t (TAGS + the gzipped search archive)
 ;; ---------------------------------------------------------------------------
 
 (setq tags-revert-without-query t)       ; reload TAGS silently after a rebuild
@@ -202,9 +212,28 @@
     (user-error "Run load-project (C-d) first to select a cscope.files"))
   (file-name-as-directory (expand-file-name src-path)))
 
+(defvar cscope-archive-script "/home/adrian/emacsrepo/emacs/cscope_archive.py"
+  "Path to the cscope_archive.py helper that builds/searches the gzip archive.")
+
+(defvar cscope-archive-base "cscope_archive"
+  "Archive base name, relative to the project root.
+The build step produces <base>.txt.gz (concatenated, gzipped sources) and
+<base>.idx (the global-line -> file lookup).")
+
+(defun cscope-archive-build ()
+  "Concatenate + gzip the files in cscope.files into the zgrep search archive."
+  (interactive)
+  (let ((default-directory (ctags--require-project)))
+    (message "Building search archive from %s ..." src-files)
+    (call-process "python3" nil "*cscope-archive*" nil
+                  cscope-archive-script "build"
+                  "-f" (expand-file-name src-files)
+                  "-a" (expand-file-name cscope-archive-base default-directory))
+    (message "Search archive ready: %s%s.txt.gz" default-directory cscope-archive-base)))
+
 (defun ctags-build ()
-  "Build an Emacs TAGS index from the files listed in cscope.files, and load it.
-Only those files are parsed -- ctags is given the list via `-L'."
+  "Rebuild BOTH indexes from cscope.files: the ctags TAGS db and the zgrep archive.
+Only the files listed in cscope.files are parsed -- ctags gets the list via `-L'."
   (interactive)
   (let ((default-directory (ctags--require-project)))
     (message "Building TAGS from %s ..." src-files)
@@ -215,28 +244,39 @@ Only those files are parsed -- ctags is given the list via `-L'."
                   "--fields=+n"
                   "-L" (expand-file-name src-files))
     (visit-tags-table (expand-file-name "TAGS" default-directory))
-    (message "TAGS ready: %sTAGS" default-directory)))
+    (cscope-archive-build)
+    (message "Indexes ready: %sTAGS + %s.txt.gz" default-directory cscope-archive-base)))
+
+(defun cscope-archive--search (grep-args)
+  "Run `cscope_archive.py search' with GREP-ARGS, showing clickable hits.
+GREP-ARGS is a list of already-shell-quoted strings passed through to zgrep.
+Output is file:line:text relative to the project root, so `grep-mode' makes
+each hit clickable."
+  (let* ((default-directory (ctags--require-project))
+         (base (expand-file-name cscope-archive-base default-directory))
+         (archive (concat base ".txt.gz")))
+    (unless (file-exists-p archive)
+      (user-error "No archive at %s -- build it first (C-c t)" archive))
+    (grep (mapconcat #'identity
+                     (append (list "python3"
+                                   (shell-quote-argument cscope-archive-script)
+                                   "search"
+                                   "-a" (shell-quote-argument base))
+                             grep-args)
+                     " "))))
 
 (defun ctags-find-references (symbol)
-  "Grep for SYMBOL across only the files listed in cscope.files."
+  "Find literal references to SYMBOL across the archived files (zgrep -F)."
   (interactive
    (list (read-string "Find references: " (thing-at-point 'symbol t))))
-  (let ((default-directory (ctags--require-project)))
-    (grep (format "cat %s | xargs grep --color=auto -nH -e %s"
-                  (shell-quote-argument (expand-file-name src-files))
-                  (shell-quote-argument symbol)))))
+  (cscope-archive--search (list "-F" "-e" (shell-quote-argument symbol))))
 
 (defun ctags-search (pattern)
-  "Free-text/regexp search for PATTERN across the indexed files.
-Greps the same file list the TAGS db is built from (cscope.files) and
-shows clickable hits in a grep buffer.  Unlike `ctags-find-references',
-PATTERN is treated as an extended regexp, not a literal symbol."
+  "Free-text search for PATTERN across the archived files (zgrep -E).
+Unlike `ctags-find-references', PATTERN is an extended regexp, not a literal."
   (interactive
-   (list (read-string "Search files: " (thing-at-point 'symbol t))))
-  (let ((default-directory (ctags--require-project)))
-    (grep (format "cat %s | xargs grep --color=auto -nHE -e %s"
-                  (shell-quote-argument (expand-file-name src-files))
-                  (shell-quote-argument pattern)))))
+   (list (read-string "Search archive: " (thing-at-point 'symbol t))))
+  (cscope-archive--search (list "-E" "-e" (shell-quote-argument pattern))))
 
 (global-set-key (kbd "C-c t") 'ctags-build)
 (global-set-key (kbd "C-c r") 'ctags-find-references)
