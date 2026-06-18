@@ -1,6 +1,10 @@
 (package-initialize)
 (add-to-list 'load-path "~/emacs")
 
+; VS Code-like dark theme (vendored in ~/emacs, no package manager needed)
+(add-to-list 'custom-theme-load-path "~/emacs")
+(load-theme 'vscode-dark t)
+
 ; general settings
 (cua-mode t)
 (menu-bar-mode -1)
@@ -9,7 +13,7 @@
 (setq inhibit-splash-screen t)
 (setq inhibit-startup-message t)
 (setq ring-bell-function 'ignore)
-(setq-default indent-tabs-mode nil)
+(setq-default indent-tabs-mode t)   ; tab-based indentation everywhere (YAML overrides below)
 (setq-default truncate-lines t)
 ;(toggle-scroll-bar -1)
 ;(tool-bar-mode -1)
@@ -223,12 +227,20 @@ The build step produces <base>.txt.gz (concatenated, gzipped sources) and
 (defun cscope-archive-build ()
   "Concatenate + gzip the files in cscope.files into the zgrep search archive."
   (interactive)
-  (let ((default-directory (ctags--require-project)))
-    (message "Building search archive from %s ..." src-files)
-    (call-process "python3" nil "*cscope-archive*" nil
-                  cscope-archive-script "build"
-                  "-f" (expand-file-name src-files)
-                  "-a" (expand-file-name cscope-archive-base default-directory))
+  (let* ((default-directory (ctags--require-project))
+         (out "*cscope-archive*")
+         (rc (progn
+               (message "Building search archive from %s ..." src-files)
+               (call-process "python3" nil out nil
+                             cscope-archive-script "build"
+                             "-f" (expand-file-name src-files)
+                             "-a" (expand-file-name cscope-archive-base default-directory)))))
+    ;; call-process returns the exit code (an integer) or a signal string.
+    ;; Python exits non-zero and writes NO archive when the source tree is
+    ;; read-only or cscope.files is empty, so don't claim success blindly.
+    (unless (eql rc 0)
+      (display-buffer out)
+      (user-error "Search archive build failed (exit %s) -- see %s" rc out))
     (message "Search archive ready: %s%s.txt.gz" default-directory cscope-archive-base)))
 
 (defun ctags-build ()
@@ -370,6 +382,13 @@ Unlike `ctags-find-references', PATTERN is an extended regexp, not a literal."
 
 
 (require 'hide)
+
+; YAML: vendored minimal mode (~/emacs/yaml-mode.el) -- highlighting + spaces
+(require 'yaml-mode)
+(add-hook 'yaml-mode-hook
+          (lambda ()
+            (setq indent-tabs-mode nil)   ; YAML forbids tabs -> use spaces
+            (setq tab-width yaml-indent-offset)))
 
 ;(setq debug-on-error t)
 
