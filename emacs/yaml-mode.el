@@ -11,22 +11,42 @@
 
 (defvar yaml-mode-syntax-table
   (let ((table (make-syntax-table)))
-    ;; `#' starts a comment that runs to end of line.
-    (modify-syntax-entry ?#  "<" table)
-    (modify-syntax-entry ?\n ">" table)
     ;; Treat these as word/symbol constituents so keys highlight cleanly.
+    ;; Comments and strings are handled by font-lock keywords (below) rather
+    ;; than the syntax table, so that a `#' or a quote that lives *inside* the
+    ;; other kind of quote is treated as ordinary text, not a new region.
     (modify-syntax-entry ?_  "w" table)
     (modify-syntax-entry ?-  "_" table)
     (modify-syntax-entry ?.  "_" table)
+    ;; Demote both quote characters to plain punctuation.  The inherited
+    ;; standard table makes ?\" a string delimiter, which would let the
+    ;; syntactic pass fontify a " that lives inside a '...' scalar.  We do all
+    ;; string highlighting via font-lock keywords instead, so neither quote
+    ;; should carry string syntax here.
+    (modify-syntax-entry ?\" "." table)
+    (modify-syntax-entry ?\' "." table)
     table)
   "Syntax table for `yaml-mode'.")
 
 (defvar yaml-font-lock-keywords
   `(;; Document / directive markers:  ---  ...  %YAML 1.2
     ("^\\(---\\|\\.\\.\\.\\|%.*\\)\\s-*$" . font-lock-comment-delimiter-face)
-    ;; Quoted strings (anchored to one line so an unbalanced quote can't run away).
-    ("\"[^\"\n]*\"" . font-lock-string-face)
-    ("'[^'\n]*'"    . font-lock-string-face)
+    ;; Quoted strings, matched as ONE left-to-right alternation so the first
+    ;; opening quote owns the span: a " inside '...' (and a ' inside "...")
+    ;; is then just literal text.  \\ escapes in "" and doubled '' in '' are
+    ;; consumed too.  Both branches forbid newlines, so a closed string never
+    ;; spills past the end of its line.
+    ("\"\\(?:\\\\.\\|[^\"\\\n]\\)*\"\\|'\\(?:''\\|[^'\n]\\)*'"
+     . font-lock-string-face)
+    ;; Unterminated quotes: an opening quote with no partner on the line is
+    ;; highlighted only to end of line.  The leading boundary keeps mid-word
+    ;; apostrophes (don't, it's) from being treated as string openers.
+    ("\\(?:^\\|[][ \t:,{}]\\)\\(\"[^\"\n]*\\)$" (1 font-lock-string-face))
+    ("\\(?:^\\|[][ \t:,{}]\\)\\('[^'\n]*\\)$"   (1 font-lock-string-face))
+    ;; Comments: `#' starts one only at line start or after whitespace (YAML
+    ;; rule).  Placed after the string rules so a # inside a string stays a
+    ;; string, and so it never runs past end of line.
+    ("\\(?:^\\|[ \t]\\)\\(#.*\\)$" (1 font-lock-comment-face))
     ;; Mapping keys, optionally preceded by block-sequence dashes.
     ("^[ \t]*\\(?:-[ \t]+\\)*\\([^ \t\n:#&*!][^:#\n]*?\\)[ \t]*:\\(?:[ \t]\\|$\\)"
      (1 font-lock-variable-name-face))

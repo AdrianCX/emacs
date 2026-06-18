@@ -9,26 +9,26 @@
 (deftheme vscode-dark
   "Dark theme approximating Visual Studio Code's default Dark+ palette.")
 
-(let ((bg            "#1e1e1e")   ; editor background
+(let ((bg            "#000000")   ; full black editor background
       (fg            "#d4d4d4")   ; default foreground
       (cursor        "#aeafad")
-      (selection     "#264f78")   ; Visual Studio / VS Code blue selection
-      (line-hl       "#2a2d2e")   ; current line / hover
+      (selection     "#1e3a5c")   ; Visual Studio blue selection (darkened)
+      (line-hl       "#1a1a1a")   ; current line / hover
       (comment       "#6a9955")   ; green
       (string        "#ce9178")   ; orange
-      (keyword       "#569cd6")   ; blue
+      (keyword       "#3f7cb0")   ; blue (darkened)
       (type          "#4ec9b0")   ; teal
       (func          "#dcdcaa")   ; yellow
       (number        "#b5cea8")   ; light green
-      (variable      "#9cdcfe")   ; light blue
+      (variable      "#80b4d0")   ; light blue (darkened)
       (control       "#c586c0")   ; purple (control keywords / builtins)
       (warning       "#d7ba7d")
       (error         "#f44747")
       (gutter        "#858585")
       (border        "#2d2d2d")
-      (ml-bg         "#007acc")   ; active modeline = VS Code status bar blue
+      (ml-bg         "#005a99")   ; active modeline = VS status bar blue (darkened)
       (ml-fg         "#ffffff")
-      (ml-inact-bg   "#252526")
+      (ml-inact-bg   "#1a1a1a")
       (match-bg      "#3a3d41"))
   (custom-theme-set-faces
    'vscode-dark
