@@ -53,6 +53,17 @@
 ; shortcuts
 (define-key global-map [(f9)]  'compile)
 
+; Compilation: auto-scroll to follow output as it arrives
+(setq compilation-scroll-output t)
+
+; Compilation: render ANSI color escapes (e.g. ^[[35m^[[1m...^[[0m) as colors
+(require 'ansi-color)
+(defun my/colorize-compilation-buffer ()
+  "Translate ANSI color escapes in the compilation output into faces."
+  (let ((inhibit-read-only t))
+    (ansi-color-apply-on-region compilation-filter-start (point))))
+(add-hook 'compilation-filter-hook 'my/colorize-compilation-buffer)
+
 ; Get /path/to/filename in clipboard
 (defun put-file-name-on-clipboard ()
   "Put the current file name on the clipboard"
