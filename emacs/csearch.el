@@ -128,6 +128,9 @@
   (when (and csearch--process (process-live-p csearch--process))
     (process-send-string csearch--process "QUIT\n"))
   (setq csearch--process nil)
+  (when (buffer-live-p csearch--fontify-buffer)
+    (kill-buffer csearch--fontify-buffer)
+    (setq csearch--fontify-buffer nil))
   (message "csearch: daemon stopped"))
 
 (defun csearch--sentinel (_proc event)
@@ -156,43 +159,86 @@
 
 ;;; Displaying results ------------------------------------------------------
 
+(defun csearch--short-path (file)
+  "Return the last two path components (parent/filename) of FILE."
+  (let ((name (file-name-nondirectory file))
+        (dir  (file-name-directory file)))
+    (if dir
+        (concat (file-name-nondirectory (directory-file-name dir)) "/" name)
+      name)))
+
+(defvar csearch--fontify-buffer nil)
+
+(defun csearch--fontify-c-line (str)
+  "Return a copy of STR with C/C++ font-lock faces applied.
+Each call is independent so highlighting never spans lines."
+  (unless (buffer-live-p csearch--fontify-buffer)
+    (setq csearch--fontify-buffer (generate-new-buffer " *csearch-fontify*"))
+    (with-current-buffer csearch--fontify-buffer
+      (c-mode)
+      (font-lock-mode 1)))
+  (with-current-buffer csearch--fontify-buffer
+    (let ((inhibit-modification-hooks t))
+      (erase-buffer)
+      (insert str)
+      (font-lock-ensure (point-min) (point-max))
+      (buffer-substring (point-min) (point-max)))))
+
 (defun csearch--display (text)
-  "Parse TEXT (file:line:content lines) and populate *csearch* buffer."
+  "Parse TEXT (file:line:content lines) and populate *csearch* buffer.
+Results are displayed in a flat grep-like format with aligned columns."
   (let ((buf (get-buffer-create "*csearch*"))
-        (lines (split-string text "\n" t))
-        (last-file nil)
-        (hits 0))
+        (raw-lines (split-string text "\n" t))
+        (entries nil)
+        (errors nil)
+        (max-path-len 0))
+    ;; First pass: parse lines, compute max short-path length.
+    (dolist (line raw-lines)
+      (if (string-match "\\`ERROR" line)
+          (push line errors)
+        (when (string-match "\\`\\(.+?\\):\\([0-9]+\\):\\(.*\\)" line)
+          (let* ((file  (match-string 1 line))
+                 (lnum  (match-string 2 line))
+                 (text  (match-string 3 line))
+                 (short (csearch--short-path file))
+                 (tag   (format "%s:%s:" short lnum))
+                 (tlen  (length tag)))
+            (when (> tlen max-path-len)
+              (setq max-path-len tlen))
+            (push (list file lnum text short tag tlen) entries)))))
+    (setq entries (nreverse entries))
+    ;; Second pass: render aligned output.
     (with-current-buffer buf
-      (let ((inhibit-read-only t))
+      (let ((inhibit-read-only t)
+            (hits 0))
         (erase-buffer)
-        (dolist (line lines)
-          (if (string-match "\\`ERROR" line)
-              (insert (propertize (concat line "\n") 'face 'error))
-            (when (string-match "\\`\\(.+?\\):\\([0-9]+\\):\\(.*\\)" line)
-              (let ((file (match-string 1 line))
-                    (lnum (match-string 2 line))
-                    (text (match-string 3 line)))
-                (unless (equal file last-file)
-                  (when last-file (insert "\n"))
-                  (let ((hdr (concat "*** " file ":")))
-                    (insert (propertize hdr 'face 'csearch-file
-                                        'csearch-file file)
-                            "\n"))
-                  (setq last-file file))
-                (let ((start (point)))
-                  (insert (propertize (format "%7s " lnum)
-                                      'face 'csearch-line-number)
-                          text "\n")
-                  (put-text-property start (point) 'csearch-file file)
-                  (put-text-property start (point) 'csearch-line
-                                     (string-to-number lnum)))
-                (cl-incf hits)))))
+        (dolist (err errors)
+          (insert (propertize (concat err "\n") 'face 'error)))
+        (dolist (entry entries)
+          (let* ((file  (nth 0 entry))
+                 (lnum  (nth 1 entry))
+                 (text  (nth 2 entry))
+                 (short (nth 3 entry))
+                 (tag   (nth 4 entry))
+                 (tlen  (nth 5 entry))
+                 (pad   (make-string (max 1 (- max-path-len tlen)) ?\s))
+                 (start (point)))
+            (insert (propertize short 'face 'csearch-file)
+                    ":"
+                    (propertize lnum 'face 'csearch-line-number)
+                    ":"
+                    pad (csearch--fontify-c-line text) "\n")
+            (put-text-property start (point) 'csearch-file file)
+            (put-text-property start (point) 'csearch-line
+                               (string-to-number lnum))
+            (cl-incf hits)))
         (goto-char (point-min))
-        (if (zerop hits)
-            (insert (propertize "No matches.\n" 'face 'csearch-separator)))
+        (when (zerop hits)
+          (insert (propertize "No matches.\n" 'face 'csearch-separator)))
         (csearch-mode)))
     (pop-to-buffer buf)
-    (message "csearch: %d hit%s" hits (if (= hits 1) "" "s"))))
+    (message "csearch: %d hit%s" (length entries)
+             (if (= (length entries) 1) "" "s"))))
 
 
 ;;; Navigation in results buffer --------------------------------------------
