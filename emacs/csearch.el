@@ -1,5 +1,7 @@
 ;;; csearch.el --- mmap-based code search daemon interface -*- lexical-binding: t -*-
 
+(require 'subr-x)
+
 ;; Drives cscope_mmap.py as a long-lived subprocess.  The daemon holds
 ;; an mmap of the concatenated source archive and answers SEARCH
 ;; queries over stdin/stdout.
@@ -133,10 +135,15 @@
     (setq csearch--fontify-buffer nil))
   (message "csearch: daemon stopped"))
 
-(defun csearch--sentinel (_proc event)
+(defun csearch--sentinel (proc event)
   (let ((ev (string-trim event)))
     (unless (member ev '("finished" "deleted"))
-      (message "csearch daemon: %s" ev))))
+      (let ((output (when (buffer-live-p (process-buffer proc))
+                      (with-current-buffer (process-buffer proc)
+                        (string-trim (buffer-string))))))
+        (if (and output (not (string-empty-p output)))
+            (message "csearch daemon: %s\n%s" ev output)
+          (message "csearch daemon: %s" ev))))))
 
 (defun csearch--filter (_proc output)
   "Accumulate OUTPUT; fire callback when --END-- arrives."
