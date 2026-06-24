@@ -172,6 +172,8 @@
 (require 'tramp)
 (setq tramp-default-method "ssh")
 
+(require 'csearch)
+
 ; Fix X11 copy paste
 ;(require 'xclip)
 ;(xclip-mode 1)
@@ -256,7 +258,7 @@ Only the files listed in cscope.files are parsed -- ctags gets the list via `-L'
                   "--fields=+n"
                   "-L" (expand-file-name src-files))
     (visit-tags-table (expand-file-name "TAGS" default-directory))
-    (cscope-archive-build)
+	(csearch-build)
     (message "Indexes ready: %sTAGS + %s.txt.gz" default-directory cscope-archive-base)))
 
 (defun cscope-archive--search (grep-args)
@@ -290,9 +292,9 @@ Unlike `ctags-find-references', PATTERN is an extended regexp, not a literal."
    (list (read-string "Search archive: " (thing-at-point 'symbol t))))
   (cscope-archive--search (list "-E" "-e" (shell-quote-argument pattern))))
 
-(global-set-key (kbd "C-c t") 'ctags-build)
-(global-set-key (kbd "C-c r") 'ctags-find-references)
-(global-set-key (kbd "C-c s") 'ctags-search)
+(global-set-key (kbd "C-c t") 'csearch-build)
+(global-set-key (kbd "C-c r") 'csearch-symbol)
+(global-set-key (kbd "C-c s") 'csearch-pattern)
 ;; `tags-search' walks the files recorded in the loaded TAGS db directly;
 ;; `M-0 M-,' (fileloop-continue) jumps to the next match after the first.
 (global-set-key (kbd "C-c S") 'tags-search)
