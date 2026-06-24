@@ -401,3 +401,5 @@ Unlike `ctags-find-references', PATTERN is an extended regexp, not a literal."
 (global-set-key (kbd "C-c C-l") 'reload-init-file)    ; Reload .emacs file
 
 
+(require 'nav-history)
+(nav-history-mode 1)
