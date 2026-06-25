@@ -71,6 +71,9 @@
 (defvar csearch--directory nil "Working directory of the daemon.")
 (defvar csearch--marker nil "Marker for return-to-origin.")
 (defvar csearch--marker-ring (make-ring 16) "Ring of origin markers.")
+(defvar csearch--origin nil
+  "Absolute path of the file a search was triggered from.
+Results are sorted by path closeness to this file.")
 
 
 ;;; Results buffer mode -----------------------------------------------------
@@ -174,6 +177,32 @@
         (concat (file-name-nondirectory (directory-file-name dir)) "/" name)
       name)))
 
+(defun csearch--abs (file)
+  "Resolve FILE to an absolute path, relative to the daemon directory."
+  (if (file-name-absolute-p file) file
+    (expand-file-name file csearch--directory)))
+
+(defun csearch--common-prefix-length (a b)
+  "Return the number of leading characters shared by strings A and B."
+  (let ((n (min (length a) (length b)))
+        (i 0))
+    (while (and (< i n) (eq (aref a i) (aref b i)))
+      (setq i (1+ i)))
+    i))
+
+(defun csearch--closeness (file)
+  "Score FILE by path closeness to `csearch--origin' (higher is closer)."
+  (if csearch--origin
+      (csearch--common-prefix-length csearch--origin (csearch--abs file))
+    0))
+
+(defun csearch--note-origin ()
+  "Record the current buffer's file as the origin for result sorting.
+Only updates when the current buffer visits a file, so searches
+re-issued from the *csearch* buffer keep the previous origin."
+  (when buffer-file-name
+    (setq csearch--origin (expand-file-name buffer-file-name))))
+
 (defvar csearch--fontify-buffer nil)
 
 (defun csearch--fontify-c-line (str)
@@ -214,6 +243,24 @@ Results are displayed in a flat grep-like format with aligned columns."
               (setq max-path-len tlen))
             (push (list file lnum text short tag tlen) entries)))))
     (setq entries (nreverse entries))
+    ;; Sort by path closeness to the originating file.  `sort' is a
+    ;; stable merge sort, so files of equal closeness keep their
+    ;; original archive order.  Closeness is cached per path because
+    ;; many entries share the same file.
+    (when csearch--origin
+      (let ((cache (make-hash-table :test 'equal)))
+        (setq entries
+              (sort entries
+                    (lambda (e1 e2)
+                      (let ((c1 (or (gethash (nth 0 e1) cache)
+                                    (puthash (nth 0 e1)
+                                             (csearch--closeness (nth 0 e1))
+                                             cache)))
+                            (c2 (or (gethash (nth 0 e2) cache)
+                                    (puthash (nth 0 e2)
+                                             (csearch--closeness (nth 0 e2))
+                                             cache))))
+                        (> c1 c2)))))))
     ;; Second pass: render aligned output.
     (with-current-buffer buf
       (let ((inhibit-read-only t)
@@ -265,9 +312,7 @@ Results are displayed in a flat grep-like format with aligned columns."
     (let ((file (car nav))
           (line (cdr nav)))
       (ring-insert csearch--marker-ring (point-marker))
-      (find-file-other-window
-       (if (file-name-absolute-p file) file
-         (expand-file-name file csearch--directory)))
+      (find-file-other-window (csearch--abs file))
       (goto-char (point-min))
       (forward-line (1- line)))))
 
@@ -280,9 +325,7 @@ Results are displayed in a flat grep-like format with aligned columns."
           (line (cdr nav))
           (win (selected-window)))
       (save-selected-window
-        (find-file-other-window
-         (if (file-name-absolute-p file) file
-           (expand-file-name file csearch--directory)))
+        (find-file-other-window (csearch--abs file))
         (goto-char (point-min))
         (forward-line (1- line)))
       (select-window win))))
@@ -327,12 +370,14 @@ Results are displayed in a flat grep-like format with aligned columns."
 (defun csearch-pattern (pattern)
   "Search for regex PATTERN in the source archive."
   (interactive (list (csearch--read "Search pattern")))
+  (csearch--note-origin)
   (csearch--send (concat "SEARCH " pattern)
                  #'csearch--display))
 
 (defun csearch-symbol (symbol)
   "Search for SYMBOL with word boundaries."
   (interactive (list (csearch--read "Find symbol")))
+  (csearch--note-origin)
   (csearch--send (format "SEARCH \\b%s\\b" (replace-regexp-in-string
                                               "[\\\\.*+?^${}()|\\[\\]]"
                                               "\\\\\\&" symbol))
@@ -341,6 +386,7 @@ Results are displayed in a flat grep-like format with aligned columns."
 (defun csearch-text (text)
   "Literal (fixed-string) search for TEXT."
   (interactive (list (csearch--read "Find text")))
+  (csearch--note-origin)
   (csearch--send (concat "SEARCH -F " text)
                  #'csearch--display))
 
