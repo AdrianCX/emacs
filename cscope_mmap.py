@@ -14,11 +14,15 @@ Daemon (started by Emacs):
 
     Commands on stdin (one per line):
         SEARCH [-i] [-F] PATTERN
-        REBUILD [cscope.files]
+        REBUILD [/path/to/cscope.files]
+        STATUS
         QUIT
 
-    Each response is zero or more ``file:line:text`` lines followed by
-    a lone ``--END--`` line.
+    Each response is zero or more result lines followed by a lone
+    ``--END--`` line.  A result line is either ``file:line:text`` (a hit)
+    or is prefixed with ``OK ``, ``WARN `` or ``ERROR `` -- diagnostics
+    that the client shows to the user.  Every command answers with
+    ``--END--`` even when it fails, so the client never hangs.
 """
 
 import argparse
@@ -27,40 +31,85 @@ import mmap
 import os
 import re
 import sys
+import traceback
 
 
 # ---------------------------------------------------------------------------
 # Build
 # ---------------------------------------------------------------------------
 
-def build(files_list, base):
+def build(files_list, base, log=None):
+    """Concatenate the files listed in FILES_LIST into BASE.dat / BASE.idx.
+
+    Returns (nfiles, nbytes, nskipped).  Raises on anything fatal, with a
+    message that names the absolute paths involved -- in daemon mode that
+    message is what gets reported back to Emacs, so it has to be enough to
+    diagnose the failure without a traceback.
+
+    Relative entries in FILES_LIST are resolved against the directory that
+    holds it, not the process cwd, so a rebuild works no matter where the
+    daemon was started.  The archive is written to temporary files and
+    renamed into place: a failed rebuild leaves the previous (working)
+    archive alone, and an mmap held on the old .dat stays valid instead of
+    being truncated underneath the running daemon.
+    """
+    log = log or (lambda msg: print(msg, file=sys.stderr))
+    files_list = os.path.abspath(files_list)
+
+    if not os.path.isfile(files_list):
+        raise FileNotFoundError(
+            f"file list not found: {files_list} (cwd {os.getcwd()})")
     with open(files_list, encoding="utf-8", errors="replace") as fl:
         paths = [l.strip() for l in fl if l.strip()]
     if not paths:
-        print(f"{files_list}: empty", file=sys.stderr)
-        return False
+        raise ValueError(f"file list is empty: {files_list}")
 
+    root = os.path.dirname(files_list)
+    base = os.path.abspath(base)
+    outdir = os.path.dirname(base) or "."
+    if not os.path.isdir(outdir):
+        raise NotADirectoryError(f"archive directory does not exist: {outdir}")
+    if not os.access(outdir, os.W_OK):
+        raise PermissionError(f"archive directory is not writable: {outdir}")
+
+    tmp_dat, tmp_idx = base + ".dat.tmp", base + ".idx.tmp"
     off, n, skip = 0, 0, 0
-    with open(base + ".dat", "wb") as dat, \
-         open(base + ".idx", "w", encoding="utf-8") as idx:
-        for p in paths:
+    try:
+        with open(tmp_dat, "wb") as dat, \
+             open(tmp_idx, "w", encoding="utf-8") as idx:
+            for p in paths:
+                src = p if os.path.isabs(p) else os.path.join(root, p)
+                try:
+                    with open(src, "rb") as fh:
+                        data = fh.read()
+                except OSError as e:
+                    if skip < 20:          # don't drown the response
+                        log(f"WARN skip {src}: {e.strerror}")
+                    skip += 1
+                    continue
+                if data and not data.endswith(b"\n"):
+                    data += b"\n"
+                idx.write(f"{off}\t{p}\n")
+                dat.write(data)
+                off += len(data)
+                n += 1
+        if skip > 20:
+            log(f"WARN ... and {skip - 20} more unreadable files")
+        if n == 0:
+            raise ValueError(
+                f"none of the {len(paths)} files listed in {files_list} "
+                f"could be read (resolved against {root})")
+        os.replace(tmp_dat, base + ".dat")
+        os.replace(tmp_idx, base + ".idx")
+    except BaseException:
+        for tmp in (tmp_dat, tmp_idx):
             try:
-                data = open(p, "rb").read()
-            except OSError as e:
-                print(f"skip {p}: {e}", file=sys.stderr)
-                skip += 1
-                continue
-            if data and not data.endswith(b"\n"):
-                data += b"\n"
-            idx.write(f"{off}\t{p}\n")
-            dat.write(data)
-            off += len(data)
-            n += 1
+                os.unlink(tmp)
+            except OSError:
+                pass
+        raise
 
-    print(f"{base}.dat: {n} files, {off} bytes", file=sys.stderr)
-    if skip:
-        print(f"({skip} skipped)", file=sys.stderr)
-    return True
+    return n, off, skip
 
 
 # ---------------------------------------------------------------------------
@@ -155,10 +204,21 @@ def _parse_search_args(rest):
     return " ".join(tokens[i:]), ic, fx
 
 
+def _describe(path):
+    try:
+        return f"{path}: {os.path.getsize(path)} bytes"
+    except OSError as e:
+        return f"{path}: {e.strerror}"
+
+
 def serve(base):
     engine = None
-    if os.path.exists(base + ".dat") and os.path.exists(base + ".idx"):
-        engine = Engine(base)
+    try:
+        if os.path.exists(base + ".dat") and os.path.exists(base + ".idx"):
+            engine = Engine(base)
+    except Exception as e:                       # noqa: BLE001 - reported, not raised
+        print(f"ERROR cannot open archive {os.path.abspath(base)}: "
+              f"{type(e).__name__}: {e}", flush=True)
     print("READY", flush=True)
 
     for raw in sys.stdin:
@@ -167,39 +227,65 @@ def serve(base):
             continue
         parts = line.split(None, 1)
         cmd = parts[0].upper()
+        arg = parts[1].strip() if len(parts) > 1 else ""
 
         if cmd == "QUIT":
             break
 
-        elif cmd == "REBUILD":
-            flist = parts[1].strip() if len(parts) > 1 else "cscope.files"
-            build(flist, base)
-            if engine:
-                engine.reload()
+        # Every command answers with --END--, including the failures: the
+        # client blocks on that sentinel, so an uncaught exception here used
+        # to kill the daemon and leave Emacs waiting forever with nothing to
+        # show.  Report the error in-band instead and stay alive.
+        try:
+            if cmd == "REBUILD":
+                n, nbytes, skip = build(arg or "cscope.files", base,
+                                        log=lambda m: print(m, flush=True))
+                if engine:
+                    engine.reload()
+                else:
+                    engine = Engine(base)
+                msg = (f"OK rebuilt {os.path.abspath(base)}.dat: "
+                       f"{n} files, {nbytes} bytes")
+                if skip:
+                    msg += f", {skip} unreadable"
+                print(msg, flush=True)
+
+            elif cmd == "SEARCH":
+                if not engine:
+                    print("ERROR no archive loaded -- rebuild it first "
+                          f"(looked for {os.path.abspath(base)}.dat)",
+                          flush=True)
+                else:
+                    pattern, ic, fx = _parse_search_args(arg)
+                    if not pattern:
+                        print("ERROR empty pattern", flush=True)
+                    else:
+                        for p, ln, txt in engine.search(pattern, ic, fx):
+                            print(f"{p}:{ln}:{txt}", flush=True)
+
+            elif cmd == "STATUS":
+                flist = os.path.abspath(arg or "cscope.files")
+                print(f"OK cwd          {os.getcwd()}", flush=True)
+                print(f"OK python       {sys.version.split()[0]} "
+                      f"({sys.executable})", flush=True)
+                print(f"OK file list    {flist}"
+                      f"{'' if os.path.isfile(flist) else '   [MISSING]'}",
+                      flush=True)
+                print(f"OK archive      {_describe(os.path.abspath(base) + '.dat')}",
+                      flush=True)
+                print(f"OK index        {_describe(os.path.abspath(base) + '.idx')}",
+                      flush=True)
+                print(f"OK indexed      {len(engine.paths) if engine else 0} files",
+                      flush=True)
+
             else:
-                engine = Engine(base)
-            print("--END--", flush=True)
+                print(f"ERROR unknown command: {cmd}", flush=True)
 
-        elif cmd == "SEARCH":
-            if not engine:
-                print("ERROR no archive — run REBUILD first", flush=True)
-                print("--END--", flush=True)
-                continue
-            pattern, ic, fx = _parse_search_args(parts[1] if len(parts) > 1 else "")
-            if not pattern:
-                print("ERROR empty pattern", flush=True)
-                print("--END--", flush=True)
-                continue
-            try:
-                for p, ln, txt in engine.search(pattern, ic, fx):
-                    print(f"{p}:{ln}:{txt}", flush=True)
-            except re.error as e:
-                print(f"ERROR {e}", flush=True)
-            print("--END--", flush=True)
+        except Exception as e:                   # noqa: BLE001 - reported, not raised
+            print(f"ERROR {cmd}: {type(e).__name__}: {e}", flush=True)
+            traceback.print_exc(file=sys.stderr)
 
-        else:
-            print(f"ERROR unknown command: {cmd}", flush=True)
-            print("--END--", flush=True)
+        print("--END--", flush=True)
 
     if engine:
         engine.close()
@@ -213,7 +299,11 @@ def cmd_search(base, args):
     pattern, ic, fx = _parse_search_args(" ".join(args))
     if not pattern:
         sys.exit("search: PATTERN required")
-    eng = Engine(base)
+    try:
+        eng = Engine(base)
+    except OSError as e:
+        sys.exit(f"search: cannot open {os.path.abspath(base)}.dat/.idx: "
+                 f"{e.strerror}")
     hits = 0
     for p, ln, txt in eng.search(pattern, ic, fx):
         print(f"{p}:{ln}:{txt}")
@@ -244,7 +334,12 @@ def main():
 
     args, extra = p.parse_known_args()
     if args.cmd == "build":
-        build(args.files, args.base)
+        try:
+            n, nbytes, skip = build(args.files, args.base)
+        except Exception as e:                   # noqa: BLE001 - message, not traceback
+            sys.exit(f"build: {e}")
+        print(f"{os.path.abspath(args.base)}.dat: {n} files, {nbytes} bytes"
+              + (f", {skip} unreadable" if skip else ""), file=sys.stderr)
     elif args.cmd == "serve":
         serve(args.base)
     elif args.cmd == "search":

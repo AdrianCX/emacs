@@ -1,6 +1,9 @@
 ;;; csearch.el --- mmap-based code search daemon interface -*- lexical-binding: t -*-
 
 (require 'subr-x)
+(require 'cl-lib)
+(require 'seq)
+(require 'ring)
 
 ;; Drives cscope_mmap.py as a long-lived subprocess.  The daemon holds
 ;; an mmap of the concatenated source archive and answers SEARCH
@@ -11,6 +14,14 @@
 ;;   M-x csearch-pattern     — search for a regex
 ;;   M-x csearch-symbol      — search for symbol at point (word-bounded)
 ;;   M-x csearch-text        — literal (fixed-string) search
+;;   M-x csearch-set-root    — point csearch at a project (sets `csearch-root')
+;;   M-x csearch-diagnose    — show the paths in use and the daemon's view
+;;   M-x csearch-restart     — throw the daemon away and start a new one
+;;
+;; Anything that goes wrong — a missing cscope.files, an unreadable
+;; archive, a daemon that dies or stops answering — lands in the
+;; *csearch-error* buffer together with the paths csearch is using and
+;; the daemon's stderr.
 ;;
 ;; In the *csearch* results buffer:
 ;;   RET  — jump to file:line
@@ -44,6 +55,28 @@
   :type 'string
   :group 'csearch)
 
+(defcustom csearch-files-name "cscope.files"
+  "Name of the file list a rebuild reads, looked up in the project root."
+  :type 'string
+  :group 'csearch)
+
+(defcustom csearch-timeout 300
+  "Seconds to wait for a daemon response before declaring it stuck."
+  :type 'number
+  :group 'csearch)
+
+(defvar csearch-root nil
+  "Project root: the directory holding `csearch-files-name'.
+When nil the root is guessed by walking up from `default-directory',
+which only works when the current buffer lives inside the project -- press
+`\\[csearch-build]' from a scratch buffer or a dired of your home and the
+guess lands somewhere with no file list, which is why a rebuild can fail
+while searching against an already-built archive keeps working.
+
+Set it explicitly with `csearch-set-root', or from a project loader:
+
+    (setq csearch-root \"/path/to/project/\")")
+
 
 ;;; Faces -------------------------------------------------------------------
 
@@ -69,6 +102,9 @@
 (defvar csearch--output  "" "Partial output accumulator.")
 (defvar csearch--callback nil "Function called with completed response text.")
 (defvar csearch--directory nil "Working directory of the daemon.")
+(defvar csearch--pending nil "Command currently awaiting a response, or nil.")
+(defvar csearch--timer nil "Timer guarding the pending command.")
+(defvar csearch--fontify-buffer nil "Scratch buffer used for C font-locking.")
 (defvar csearch--marker nil "Marker for return-to-origin.")
 (defvar csearch--marker-ring (make-ring 16) "Ring of origin markers.")
 (defvar csearch--origin nil
@@ -89,6 +125,7 @@ Results are sorted by path closeness to this file.")
     (define-key map "g"   #'csearch-build)
     (define-key map "s"   #'csearch-pattern)
     (define-key map "S"   #'csearch-symbol)
+    (define-key map "?"   #'csearch-diagnose)
     map)
   "Keymap for `csearch-mode'.")
 
@@ -101,52 +138,206 @@ Results are sorted by path closeness to this file.")
 ;;; Daemon management -------------------------------------------------------
 
 (defun csearch--find-root ()
-  "Walk up from `default-directory' to find cscope.files."
-  (let ((dir default-directory))
+  "Walk up from `default-directory' looking for `csearch-files-name'.
+Returns nil when no ancestor directory holds one -- unlike a silent
+fallback to `default-directory', that lets the caller say so."
+  (let ((dir (expand-file-name default-directory)))
     (while (and dir
-                (not (file-exists-p (expand-file-name "cscope.files" dir))))
+                (not (file-exists-p (expand-file-name csearch-files-name dir))))
       (let ((parent (file-name-directory (directory-file-name dir))))
         (setq dir (if (string= parent dir) nil parent))))
-    (or dir default-directory)))
+    dir))
+
+(defun csearch--root (&optional strict)
+  "Return the project root: `csearch-root', else the walk-up guess.
+With STRICT, signal a `user-error' naming the problem when no root with a
+`csearch-files-name' in it can be found."
+  (let ((root (or csearch-root (csearch--find-root))))
+    (cond
+     (root (file-name-as-directory (expand-file-name root)))
+     (strict
+      (csearch--report
+       (format "csearch: no %s found" csearch-files-name)
+       (format "Walked up from %s to / without finding %s, and `csearch-root'\n\
+is not set.  Fix it with:\n\n    M-x csearch-set-root RET /path/to/project/ RET\n\n\
+or set it once from your project loader:\n\n    (setq csearch-root source-path)"
+               default-directory csearch-files-name)
+       t)
+      (user-error "csearch: no %s above %s; use M-x csearch-set-root"
+                  csearch-files-name default-directory))
+     (t (file-name-as-directory (expand-file-name default-directory))))))
+
+(defun csearch-set-root (dir)
+  "Set `csearch-root' to DIR and restart the daemon there."
+  (interactive "DProject root (holding cscope.files): ")
+  (let ((dir (file-name-as-directory (expand-file-name dir))))
+    (unless (file-exists-p (expand-file-name csearch-files-name dir))
+      (unless (y-or-n-p (format "No %s in %s -- use it anyway? "
+                                csearch-files-name dir))
+        (user-error "csearch: root unchanged")))
+    (setq csearch-root dir)
+    (csearch--kill)
+    (message "csearch: root set to %s" dir)))
+
+
+;;; Error reporting ---------------------------------------------------------
+
+(defconst csearch--stderr-name " *csearch-stderr*"
+  "Buffer holding the daemon's stderr, kept out of the response stream.")
+
+(defun csearch--stderr-text ()
+  "Return the daemon's stderr output, or nil when there is none."
+  (let ((buf (get-buffer csearch--stderr-name)))
+    (when (buffer-live-p buf)
+      (let ((s (string-trim (with-current-buffer buf (buffer-string)))))
+        (unless (string-empty-p s) s)))))
+
+(defun csearch--context ()
+  "Describe the current configuration, flagging whatever is missing."
+  (let* ((root (or csearch-root (csearch--find-root)))
+         (root (and root (file-name-as-directory (expand-file-name root))))
+         (flist (and root (expand-file-name csearch-files-name root)))
+         (dat (and root (concat (expand-file-name csearch-base root) ".dat"))))
+    (concat
+     (format "program    %s%s\n" csearch-program
+             (if (file-readable-p csearch-program) "" "   [NOT READABLE]"))
+     (format "root       %s\n"
+             (cond ((null root) (format "UNKNOWN -- no %s above %s"
+                                        csearch-files-name default-directory))
+                   ((file-directory-p root) root)
+                   (t (concat root "   [NOT A DIRECTORY]"))))
+     (format "           %s\n"
+             (if csearch-root "from `csearch-root'"
+               "guessed from the current buffer -- set `csearch-root' to pin it"))
+     (format "file list  %s%s\n" (or flist "-")
+             (if (and flist (file-readable-p flist)) "" "   [MISSING]"))
+     (format "archive    %s%s\n" (or dat "-")
+             (if (and dat (file-exists-p dat))
+                 (format "   (%d bytes)" (file-attribute-size
+                                          (file-attributes dat)))
+               "   [MISSING]"))
+     (format "daemon     %s\n"
+             (if (process-live-p csearch--process)
+                 (format "running (pid %s) in %s"
+                         (process-id csearch--process) csearch--directory)
+               "not running")))))
+
+(defun csearch--report (title detail &optional errorp quiet)
+  "Show TITLE, the current context and DETAIL in the *csearch-error* buffer.
+With QUIET, fill the buffer but leave it unshown -- the echo area still
+points at it, so a rebuild that merely skipped a few files does not steal
+a window."
+  (let ((buf (get-buffer-create "*csearch-error*")))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (propertize title 'face (if errorp 'error 'bold)) "\n\n")
+        (insert (csearch--context) "\n")
+        (when (and detail (not (string-empty-p (string-trim detail))))
+          (insert "--- daemon output ---\n" (string-trim detail) "\n\n"))
+        (let ((err (csearch--stderr-text)))
+          (when err
+            (insert "--- daemon stderr ---\n" err "\n")))
+        (goto-char (point-min))
+        (special-mode)))
+    (unless quiet (display-buffer buf))
+    (message "%s -- see *csearch-error*" title)))
+
+(defun csearch--errors (text)
+  "Return the ERROR lines of TEXT as a list."
+  (seq-filter (lambda (l) (string-prefix-p "ERROR" l))
+              (split-string (or text "") "\n" t)))
+
+
+;;; Daemon lifecycle --------------------------------------------------------
+
+(defun csearch--cancel-timer ()
+  (when csearch--timer
+    (cancel-timer csearch--timer)
+    (setq csearch--timer nil)))
+
+(defun csearch--kill (&optional quietly)
+  "Terminate the daemon, dropping any pending request."
+  (csearch--cancel-timer)
+  (setq csearch--callback nil
+        csearch--pending nil)
+  (when (process-live-p csearch--process)
+    (set-process-sentinel csearch--process #'ignore)
+    (ignore-errors (process-send-string csearch--process "QUIT\n"))
+    (ignore-errors (delete-process csearch--process))
+    (unless quietly (message "csearch: daemon stopped")))
+  (setq csearch--process nil))
 
 (defun csearch--ensure ()
-  "Start the daemon if it is not already running.  Returns the process."
-  (unless (and csearch--process (process-live-p csearch--process))
-    (let* ((dir (csearch--find-root))
-           (default-directory dir))
-      (setq csearch--directory dir
-            csearch--output ""
-            csearch--callback nil
-            csearch--process
-            (start-process "csearch" " *csearch-daemon*"
-                           "python3" csearch-program
-                           "serve" "-b" csearch-base))
-      (set-process-filter csearch--process #'csearch--filter)
-      (set-process-sentinel csearch--process #'csearch--sentinel)
-      (set-process-query-on-exit-flag csearch--process nil)
-      (message "csearch: daemon started in %s" dir)))
+  "Start the daemon if needed, in the current root.  Returns the process."
+  (let ((root (csearch--root t)))
+    ;; The daemon's cwd is fixed at startup, so a root change means a
+    ;; restart -- otherwise it would keep answering about the old project.
+    (when (and (process-live-p csearch--process)
+               (not (equal csearch--directory root)))
+      (csearch--kill t))
+    (unless (process-live-p csearch--process)
+      (unless (file-readable-p csearch-program)
+        (csearch--report "csearch: daemon program not found"
+                         (format "`csearch-program' points at\n  %s\nwhich does \
+not exist or is not readable.\nSet it with M-x customize-variable RET \
+csearch-program RET." csearch-program)
+                         t)
+        (user-error "csearch: no such program: %s" csearch-program))
+      (let ((default-directory root)
+            (stderr (get-buffer-create csearch--stderr-name)))
+        (with-current-buffer stderr (erase-buffer))
+        (setq csearch--directory root
+              csearch--output ""
+              csearch--callback nil
+              csearch--pending nil
+              csearch--process
+              (make-process :name "csearch"
+                            :buffer nil
+                            :command (list "python3" csearch-program
+                                           "serve" "-b" csearch-base)
+                            :connection-type 'pipe
+                            :noquery t
+                            :stderr stderr
+                            :filter #'csearch--filter
+                            :sentinel #'csearch--sentinel))
+        ;; Emacs gives the :stderr buffer its own pipe process, whose
+        ;; sentinel would otherwise write "finished" into the very buffer
+        ;; we quote back to the user.
+        (let ((pipe (get-buffer-process stderr)))
+          (when pipe (set-process-sentinel pipe #'ignore)))
+        (message "csearch: daemon started in %s" root))))
   csearch--process)
 
 (defun csearch-stop ()
   "Stop the daemon."
   (interactive)
-  (when (and csearch--process (process-live-p csearch--process))
-    (process-send-string csearch--process "QUIT\n"))
-  (setq csearch--process nil)
+  (csearch--kill)
   (when (buffer-live-p csearch--fontify-buffer)
     (kill-buffer csearch--fontify-buffer)
-    (setq csearch--fontify-buffer nil))
-  (message "csearch: daemon stopped"))
+    (setq csearch--fontify-buffer nil)))
+
+(defun csearch-restart ()
+  "Stop the daemon and start a fresh one in the current root."
+  (interactive)
+  (csearch--kill t)
+  (csearch--ensure))
 
 (defun csearch--sentinel (proc event)
-  (let ((ev (string-trim event)))
-    (unless (member ev '("finished" "deleted"))
-      (let ((output (when (buffer-live-p (process-buffer proc))
-                      (with-current-buffer (process-buffer proc)
-                        (string-trim (buffer-string))))))
-        (if (and output (not (string-empty-p output)))
-            (message "csearch daemon: %s\n%s" ev output)
-          (message "csearch daemon: %s" ev))))))
+  "Report an unexpected daemon exit instead of leaving the caller hanging."
+  (when (eq proc csearch--process)
+    (let ((ev (string-trim event))
+          (pending csearch--pending)
+          (partial csearch--output))
+      (setq csearch--process nil
+            csearch--callback nil
+            csearch--pending nil)
+      (csearch--cancel-timer)
+      (unless (member ev '("finished" "deleted"))
+        (csearch--report
+         (format "csearch: daemon %s%s" ev
+                 (if pending (format " while running: %s" pending) ""))
+         partial t)))))
 
 (defun csearch--filter (_proc output)
   "Accumulate OUTPUT; fire callback when --END-- arrives."
@@ -155,16 +346,54 @@ Results are sorted by path closeness to this file.")
     (when end-pos
       (let ((text (substring csearch--output 0 end-pos))
             (cb csearch--callback))
+        (csearch--cancel-timer)
         (setq csearch--output (substring csearch--output (match-end 0))
-              csearch--callback nil)
-        (when cb (funcall cb text))))))
+              csearch--callback nil
+              csearch--pending nil)
+        (when cb
+          (condition-case err (funcall cb text)
+            (error (csearch--report
+                    (format "csearch: %s" (error-message-string err))
+                    text t))))))))
+
+(defun csearch--timeout (command)
+  "Give up on COMMAND after `csearch-timeout' seconds and say so."
+  (setq csearch--timer nil)
+  (when csearch--callback
+    (setq csearch--callback nil
+          csearch--pending nil)
+    (csearch--report
+     (format "csearch: no response to `%s' after %s seconds"
+             command csearch-timeout)
+     csearch--output t)))
 
 (defun csearch--send (command callback)
   "Send COMMAND string to the daemon; call CALLBACK with response body."
-  (csearch--ensure)
-  (setq csearch--output ""
-        csearch--callback callback)
-  (process-send-string csearch--process (concat command "\n")))
+  (let ((proc (csearch--ensure)))
+    (csearch--cancel-timer)
+    (setq csearch--output ""
+          csearch--callback callback
+          csearch--pending command
+          csearch--timer (run-at-time csearch-timeout nil
+                                      #'csearch--timeout command))
+    (condition-case err
+        (process-send-string proc (concat command "\n"))
+      (error
+       (csearch--cancel-timer)
+       (setq csearch--callback nil
+             csearch--pending nil)
+       (csearch--report (format "csearch: cannot reach the daemon (%s)"
+                                (error-message-string err))
+                        csearch--output t)))))
+
+(defun csearch-diagnose ()
+  "Show how csearch is configured and what the daemon sees from its cwd."
+  (interactive)
+  (condition-case err
+      (csearch--send "STATUS"
+                     (lambda (text) (csearch--report "csearch status" text)))
+    (error (csearch--report (format "csearch: %s" (error-message-string err))
+                            nil t))))
 
 
 ;;; Displaying results ------------------------------------------------------
@@ -203,8 +432,6 @@ re-issued from the *csearch* buffer keep the previous origin."
   (when buffer-file-name
     (setq csearch--origin (expand-file-name buffer-file-name))))
 
-(defvar csearch--fontify-buffer nil)
-
 (defun csearch--fontify-c-line (str)
   "Return a copy of STR with C/C++ font-lock faces applied.
 Each call is independent so highlighting never spans lines."
@@ -220,7 +447,7 @@ Each call is independent so highlighting never spans lines."
       (font-lock-ensure (point-min) (point-max))
       (buffer-substring (point-min) (point-max)))))
 
-(defun csearch--display (text)
+(cl-defun csearch--display (text)
   "Parse TEXT (file:line:content lines) and populate *csearch* buffer.
 Results are displayed in a flat grep-like format with aligned columns."
   (let ((buf (get-buffer-create "*csearch*"))
@@ -230,7 +457,7 @@ Results are displayed in a flat grep-like format with aligned columns."
         (max-path-len 0))
     ;; First pass: parse lines, compute max short-path length.
     (dolist (line raw-lines)
-      (if (string-match "\\`ERROR" line)
+      (if (string-match "\\`\\(ERROR\\|WARN\\|OK\\)\\b" line)
           (push line errors)
         (when (string-match "\\`\\(.+?\\):\\([0-9]+\\):\\(.*\\)" line)
           (let* ((file  (match-string 1 line))
@@ -242,7 +469,14 @@ Results are displayed in a flat grep-like format with aligned columns."
             (when (> tlen max-path-len)
               (setq max-path-len tlen))
             (push (list file lnum text short tag tlen) entries)))))
-    (setq entries (nreverse entries))
+    (setq entries (nreverse entries)
+          errors  (nreverse errors))
+    ;; A failed search has no hits to show; send the reason to the error
+    ;; buffer, where it comes with the paths csearch is actually using.
+    (when (and (null entries) (csearch--errors text))
+      (csearch--report (concat "csearch: " (car (csearch--errors text)))
+                       text t)
+      (cl-return-from csearch--display))
     ;; Sort by path closeness to the originating file.  `sort' is a
     ;; stable merge sort, so files of equal closeness keep their
     ;; original archive order.  Closeness is cached per path because
@@ -390,11 +624,42 @@ Results are displayed in a flat grep-like format with aligned columns."
   (csearch--send (concat "SEARCH -F " text)
                  #'csearch--display))
 
+(defun csearch--build-done (text)
+  "Report the outcome of a rebuild described by TEXT."
+  (let ((errors (csearch--errors text))
+        (summary (car (seq-filter (lambda (l) (string-prefix-p "OK " l))
+                                  (split-string text "\n" t)))))
+    (cond
+     (errors (csearch--report (concat "csearch: rebuild failed -- "
+                                      (car errors))
+                              text t))
+     (summary
+      (if (string-match-p "^WARN" text)
+          ;; Skipped files are worth recording but not worth a popped
+          ;; window on every rebuild -- stale cscope.files entries are normal.
+          (csearch--report (concat "csearch: " (substring summary 3))
+                           text nil t)
+        (message "csearch: %s" (substring summary 3))))
+     (t (csearch--report "csearch: rebuild gave no confirmation" text t)))))
+
 (defun csearch-build ()
-  "Rebuild the source archive from cscope.files."
+  "Rebuild the source archive from `csearch-files-name' in the project root.
+The file list is resolved here and passed to the daemon as an absolute
+path, so the rebuild does not depend on the directory the daemon happens
+to have been started in."
   (interactive)
-  (csearch--send "REBUILD"
-                 (lambda (_) (message "csearch: rebuild complete"))))
+  (let* ((root (csearch--root t))
+         (flist (expand-file-name csearch-files-name root)))
+    (unless (file-readable-p flist)
+      (csearch--report
+       (format "csearch: cannot rebuild, no %s" csearch-files-name)
+       (format "Expected the file list at\n  %s\n\nEither point csearch at the \
+right project:\n\n    M-x csearch-set-root RET /path/to/project/ RET\n\n\
+or create that file list." flist)
+       t)
+      (user-error "csearch: no %s" flist))
+    (message "csearch: rebuilding from %s ..." flist)
+    (csearch--send (concat "REBUILD " flist) #'csearch--build-done)))
 
 ;;; Global keybindings ------------------------------------------------------
 
