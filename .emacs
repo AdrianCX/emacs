@@ -198,14 +198,15 @@
 ;;                            and free-text searches `zgrep' this one archive
 ;;                            instead of grepping hundreds of separate files, and
 ;;                            cscope_archive.py maps each hit back to file:line.
-;; `C-c t' rebuilds BOTH.
+;; `C-c t' rebuilds the search archive; `M-x ctags-build' rebuilds BOTH.
 ;;
 ;;   Jump to definition : M-.   (xref-find-definitions, uses TAGS)
 ;;   Jump back          : M-,   (xref-go-back)
 ;;   Find references    : C-c r (literal zgrep over the gzipped archive)
 ;;   Free-text search   : C-c s (regexp zgrep over the gzipped archive)
 ;;   Find file          : C-w   (existing ido-choose-from-cscope)
-;;   (Re)build indexes  : C-c t (TAGS + the gzipped search archive)
+;;   (Re)build indexes  : C-c t (asks first: `y' refreshes only the files
+;;                        open in Emacs and changed, `n' rebuilds everything)
 ;; ---------------------------------------------------------------------------
 
 (setq tags-revert-without-query t)       ; reload TAGS silently after a rebuild
@@ -298,8 +299,10 @@ Unlike `ctags-find-references', PATTERN is an extended regexp, not a literal."
    (list (read-string "Search archive: " (thing-at-point 'symbol t))))
   (cscope-archive--search (list "-E" "-e" (shell-quote-argument pattern))))
 
-;; C-c t rebuilds the search archive only.  `M-x ctags-build' rebuilds
-;; TAGS as well and then calls csearch-build, so it still does both.
+;; C-c t rebuilds the search archive only, after asking whether to refresh
+;; just the files open in Emacs and changed since the last build -- answer
+;; `n' for the full rebuild.  `M-x ctags-build' rebuilds TAGS as well and
+;; then calls csearch-build from Lisp, which is always the full rebuild.
 (global-set-key (kbd "C-c t") 'csearch-build)
 (global-set-key (kbd "C-c r") 'csearch-symbol)
 (global-set-key (kbd "C-c s") 'csearch-pattern)

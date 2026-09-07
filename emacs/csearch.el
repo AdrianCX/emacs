@@ -11,6 +11,9 @@
 ;;
 ;; Usage from Emacs:
 ;;   M-x csearch-build       — (re)build the archive from cscope.files
+;;                             (asks first whether to refresh only the files
+;;                              Emacs has open and changed)
+;;   M-x csearch-update      — refresh only those changed files, in place
 ;;   M-x csearch-pattern     — search for a regex
 ;;   M-x csearch-symbol      — search for symbol at point (word-bounded)
 ;;   M-x csearch-text        — literal (fixed-string) search
@@ -625,29 +628,101 @@ Results are displayed in a flat grep-like format with aligned columns."
                  #'csearch--display))
 
 (defun csearch--build-done (text)
-  "Report the outcome of a rebuild described by TEXT."
+  "Report the outcome of a rebuild or a partial refresh described by TEXT."
   (let ((errors (csearch--errors text))
         (summary (car (seq-filter (lambda (l) (string-prefix-p "OK " l))
                                   (split-string text "\n" t)))))
     (cond
-     (errors (csearch--report (concat "csearch: rebuild failed -- "
+     (errors (csearch--report (concat "csearch: build failed -- "
                                       (car errors))
                               text t))
      (summary
       (if (string-match-p "^WARN" text)
           ;; Skipped files are worth recording but not worth a popped
-          ;; window on every rebuild -- stale cscope.files entries are normal.
+          ;; window on every rebuild -- stale cscope.files entries are normal,
+          ;; and so is a new file that a refresh cannot add to the archive.
           (csearch--report (concat "csearch: " (substring summary 3))
                            text nil t)
         (message "csearch: %s" (substring summary 3))))
-     (t (csearch--report "csearch: rebuild gave no confirmation" text t)))))
+     (t (csearch--report "csearch: build gave no confirmation" text t)))))
 
-(defun csearch-build ()
+(defun csearch--archive ()
+  "Absolute path of the archive's .dat file in the current root."
+  (concat (expand-file-name csearch-base (csearch--root t)) ".dat"))
+
+(defun csearch--changed-buffers (root built)
+  "Return the live file buffers under ROOT changed since BUILT.
+BUILT is the archive's timestamp; a buffer qualifies when it has unsaved
+changes or when its file is newer on disk than the archive.  ROOT only
+keeps unrelated buffers -- a scratch file, an init file -- out of the
+request; whether a file is really part of the archive is left to the
+daemon, which holds the index and can say so exactly."
+  (seq-filter
+   (lambda (buf)
+     (let ((file (buffer-local-value 'buffer-file-name buf)))
+       (and file
+            (string-prefix-p root (expand-file-name file))
+            (file-readable-p file)
+            (or (buffer-modified-p buf)
+                (time-less-p built (file-attribute-modification-time
+                                    (file-attributes file)))))))
+   (buffer-list)))
+
+(defun csearch-update ()
+  "Refresh only the files Emacs has open and changed since the last build.
+The rest of the archive is copied across untouched, so this costs one copy
+of the archive instead of a re-read of every file in `csearch-files-name'.
+Files that are not in the archive yet cannot be added this way -- they are
+reported, and picking them up needs a full rebuild."
+  (interactive)
+  (let* ((root (csearch--root t))
+         (archive (csearch--archive)))
+    (unless (file-exists-p archive)
+      (user-error "csearch: no archive at %s -- answer `n' for a full build"
+                  archive))
+    (let* ((built (file-attribute-modification-time (file-attributes archive)))
+           (bufs (csearch--changed-buffers root built))
+           (unsaved (seq-filter #'buffer-modified-p bufs)))
+      (unless bufs
+        (user-error "csearch: no open buffer has changed since %s was built"
+                    (file-name-nondirectory archive)))
+      ;; The archive is built from what is on disk, so an unsaved buffer
+      ;; would be re-indexed from its stale saved copy.
+      (when (and unsaved
+                 (y-or-n-p (format "Save %d modified buffer%s first? "
+                                   (length unsaved)
+                                   (if (= 1 (length unsaved)) "" "s"))))
+        (dolist (buf unsaved)
+          (with-current-buffer buf (save-buffer))))
+      (let ((files (mapcar (lambda (buf)
+                             (expand-file-name
+                              (buffer-local-value 'buffer-file-name buf)))
+                           bufs)))
+        (message "csearch: refreshing %d file%s ..." (length files)
+                 (if (= 1 (length files)) "" "s"))
+        (csearch--send (mapconcat #'identity (cons "UPDATE" (cons root files))
+                                  "\t")
+                       #'csearch--build-done)))))
+
+(defun csearch-build (&optional modified-only)
   "Rebuild the source archive from `csearch-files-name' in the project root.
 The file list is resolved here and passed to the daemon as an absolute
 path, so the rebuild does not depend on the directory the daemon happens
-to have been started in."
-  (interactive)
+to have been started in.
+
+Interactively you are asked whether to refresh only the files Emacs has
+open and changed; answering `y' hands off to `csearch-update', which
+leaves the rest of the archive alone.  Called from Lisp without
+MODIFIED-ONLY it always does the full rebuild, so `ctags-build' and `g'
+in the results buffer keep their old meaning."
+  (interactive
+   (list (y-or-n-p "Do you want to refresh only emacs modified files? ")))
+  (if modified-only
+      (csearch-update)
+    (csearch--build-all)))
+
+(defun csearch--build-all ()
+  "Rebuild the whole archive from the project's file list."
   (let* ((root (csearch--root t))
          (flist (expand-file-name csearch-files-name root)))
     (unless (file-readable-p flist)

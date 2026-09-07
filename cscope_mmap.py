@@ -7,6 +7,7 @@ stdin/stdout daemon so Emacs can start it once and query repeatedly.
 
 Standalone:
     cscope_mmap.py build  [-f cscope.files] [-b BASE]
+    cscope_mmap.py update [-b BASE] [-r ROOT] FILE...
     cscope_mmap.py search [-b BASE] [-i] [-F] PATTERN
 
 Daemon (started by Emacs):
@@ -15,6 +16,7 @@ Daemon (started by Emacs):
     Commands on stdin (one per line):
         SEARCH [-i] [-F] PATTERN
         REBUILD [/path/to/cscope.files]
+        UPDATE  ROOT<TAB>FILE[<TAB>FILE...]
         STATUS
         QUIT
 
@@ -110,6 +112,130 @@ def build(files_list, base, log=None):
         raise
 
     return n, off, skip
+
+
+def _read_index(idx_path, dat_size):
+    """Return the archive's entries as (start, end, path-as-written) spans."""
+    entries = []
+    with open(idx_path, encoding="utf-8") as f:
+        for ln in f:
+            ln = ln.rstrip("\n")
+            if ln:
+                off, path = ln.split("\t", 1)
+                entries.append((int(off), path))
+    spans = []
+    for i, (off, path) in enumerate(entries):
+        end = entries[i + 1][0] if i + 1 < len(entries) else dat_size
+        spans.append((off, end, path))
+    return spans
+
+
+def update(base, root, paths, log=None):
+    """Refresh only PATHS inside the existing BASE.dat / BASE.idx archive.
+
+    Everything the index already holds is kept in place: the untouched files
+    are copied straight out of the old archive in whole runs, and only the
+    named ones are re-read from disk.  That is the point of the command --
+    a rebuild re-reads every file in cscope.files, which is minutes on a big
+    tree, while this touches the handful of files the editor changed.
+
+    PATHS are matched against the index by absolute path; relative index
+    entries are resolved against ROOT, the same way `build' resolved them.
+    Files the index does not know about cannot be added here (their content
+    would have nowhere to go in the offset table) -- they come back in the
+    `missing' list so the caller can say a full rebuild is needed.
+
+    Returns (nupdated, nbytes, missing).
+    """
+    log = log or (lambda msg: print(msg, file=sys.stderr))
+    base = os.path.abspath(base)
+    dat_path, idx_path = base + ".dat", base + ".idx"
+    if not (os.path.isfile(dat_path) and os.path.isfile(idx_path)):
+        raise FileNotFoundError(
+            f"no archive to update at {dat_path} -- build it first")
+    if not os.path.isdir(root):
+        raise NotADirectoryError(f"project root is not a directory: {root}")
+
+    dat_size = os.path.getsize(dat_path)
+    spans = _read_index(idx_path, dat_size)
+    if not spans:
+        raise ValueError(f"index is empty: {idx_path}")
+
+    def resolve(p):
+        return os.path.abspath(p if os.path.isabs(p) else os.path.join(root, p))
+
+    wanted = {os.path.abspath(p) for p in paths}
+    changed, found = set(), set()
+    for i, (_, _, p) in enumerate(spans):
+        abs_p = resolve(p)
+        if abs_p in wanted:
+            changed.add(i)
+            found.add(abs_p)
+    missing = sorted(wanted - found)
+    if not changed:
+        return 0, dat_size, missing
+
+    tmp_dat, tmp_idx = base + ".dat.tmp", base + ".idx.tmp"
+    chunk = 1 << 22
+    off, n, i, total = 0, 0, 0, len(spans)
+    try:
+        with open(dat_path, "rb") as old, \
+             open(tmp_dat, "wb") as dat, \
+             open(tmp_idx, "w", encoding="utf-8") as idx:
+            while i < total:
+                start, end, p = spans[i]
+                if i in changed:
+                    src = p if os.path.isabs(p) else os.path.join(root, p)
+                    try:
+                        with open(src, "rb") as fh:
+                            data = fh.read()
+                    except OSError as e:
+                        # Keep the archived copy rather than dropping the
+                        # file out of the archive over a transient read error.
+                        log(f"WARN keep old copy of {src}: {e.strerror}")
+                        old.seek(start)
+                        data = old.read(end - start)
+                    else:
+                        if data and not data.endswith(b"\n"):
+                            data += b"\n"
+                        n += 1
+                    idx.write(f"{off}\t{p}\n")
+                    dat.write(data)
+                    off += len(data)
+                    i += 1
+                else:
+                    # Copy the whole run of untouched files in one go; their
+                    # offsets only shift by however much the archive grew or
+                    # shrank ahead of them.
+                    j = i
+                    while j < total and j not in changed:
+                        j += 1
+                    run_start, run_end = spans[i][0], spans[j - 1][1]
+                    for k in range(i, j):
+                        idx.write(f"{off + spans[k][0] - run_start}\t{spans[k][2]}\n")
+                    old.seek(run_start)
+                    left = run_end - run_start
+                    while left > 0:
+                        buf = old.read(min(chunk, left))
+                        if not buf:
+                            raise EOFError(
+                                f"{dat_path} is shorter than {idx_path} says "
+                                f"({dat_size} bytes) -- rebuild it")
+                        dat.write(buf)
+                        left -= len(buf)
+                    off += run_end - run_start
+                    i = j
+        os.replace(tmp_dat, dat_path)
+        os.replace(tmp_idx, idx_path)
+    except BaseException:
+        for tmp in (tmp_dat, tmp_idx):
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        raise
+
+    return n, off, missing
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +376,31 @@ def serve(base):
                     msg += f", {skip} unreadable"
                 print(msg, flush=True)
 
+            elif cmd == "UPDATE":
+                # ROOT<TAB>FILE<TAB>FILE...  -- tabs, because a path may
+                # contain spaces and the index format already rules out tabs.
+                fields = [f for f in arg.split("\t") if f.strip()]
+                if len(fields) < 2:
+                    print("ERROR UPDATE needs a root and at least one file",
+                          flush=True)
+                else:
+                    n, nbytes, missing = update(
+                        base, fields[0], fields[1:],
+                        log=lambda m: print(m, flush=True))
+                    for m in missing[:20]:
+                        print(f"WARN not in the archive: {m}", flush=True)
+                    if len(missing) > 20:
+                        print(f"WARN ... and {len(missing) - 20} more not in "
+                              "the archive", flush=True)
+                    if n:
+                        if engine:
+                            engine.reload()
+                        else:
+                            engine = Engine(base)
+                    print(f"OK refreshed {n} file{'' if n == 1 else 's'} in "
+                          f"{os.path.abspath(base)}.dat: {nbytes} bytes",
+                          flush=True)
+
             elif cmd == "SEARCH":
                 if not engine:
                     print("ERROR no archive loaded -- rebuild it first "
@@ -326,6 +477,12 @@ def main():
     b.add_argument("-f", "--files", default="cscope.files")
     b.add_argument("-b", "--base", default="cscope_archive")
 
+    u = sub.add_parser("update", help="refresh only the named files in place")
+    u.add_argument("-b", "--base", default="cscope_archive")
+    u.add_argument("-r", "--root", default=".",
+                   help="directory relative index entries are resolved against")
+    u.add_argument("files", nargs="+")
+
     s = sub.add_parser("serve", help="stdin/stdout daemon for Emacs")
     s.add_argument("-b", "--base", default="cscope_archive")
 
@@ -340,6 +497,15 @@ def main():
             sys.exit(f"build: {e}")
         print(f"{os.path.abspath(args.base)}.dat: {n} files, {nbytes} bytes"
               + (f", {skip} unreadable" if skip else ""), file=sys.stderr)
+    elif args.cmd == "update":
+        try:
+            n, nbytes, missing = update(args.base, args.root, args.files)
+        except Exception as e:                   # noqa: BLE001 - message, not traceback
+            sys.exit(f"update: {e}")
+        for m in missing:
+            print(f"not in the archive: {m}", file=sys.stderr)
+        print(f"{os.path.abspath(args.base)}.dat: {n} files refreshed, "
+              f"{nbytes} bytes", file=sys.stderr)
     elif args.cmd == "serve":
         serve(args.base)
     elif args.cmd == "search":
