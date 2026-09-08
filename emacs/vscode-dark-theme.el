@@ -9,7 +9,11 @@
 (deftheme vscode-dark
   "Dark theme approximating Visual Studio Code's default Dark+ palette.")
 
-(let ((bg            "#000000")   ; full black editor background
+(let ((bg            "#010101")   ; near-black editor background; NOT exact #000000 so
+                                  ; terminal Emacs emits a 24-bit truecolor escape
+                                  ; (48;2;1;1;1) instead of the legacy `ESC[40m' palette
+                                  ; code, which renders as the terminal's (gray) ANSI color 0.
+                                  ; Visually identical to pure black in a GUI.
       (fg            "#d4d4d4")   ; default foreground
       (cursor        "#aeafad")
       (selection     "#1e3a5c")   ; Visual Studio blue selection (darkened)

@@ -183,6 +183,8 @@
 (require 'tramp)
 (setq tramp-default-method "ssh")
 
+(require 'csearch)
+
 ; Fix X11 copy paste
 ;(require 'xclip)
 ;(xclip-mode 1)
@@ -207,14 +209,15 @@
 ;;                            and free-text searches `zgrep' this one archive
 ;;                            instead of grepping hundreds of separate files, and
 ;;                            cscope_archive.py maps each hit back to file:line.
-;; `C-c t' rebuilds BOTH.
+;; `C-c t' rebuilds the search archive; `M-x ctags-build' rebuilds BOTH.
 ;;
 ;;   Jump to definition : M-.   (xref-find-definitions, uses TAGS)
 ;;   Jump back          : M-,   (xref-go-back)
 ;;   Find references    : C-c r (literal zgrep over the gzipped archive)
 ;;   Free-text search   : C-c s (regexp zgrep over the gzipped archive)
 ;;   Find file          : C-w   (existing ido-choose-from-cscope)
-;;   (Re)build indexes  : C-c t (TAGS + the gzipped search archive)
+;;   (Re)build indexes  : C-c t (asks first: `y' refreshes only the files
+;;                        open in Emacs and changed, `n' rebuilds everything)
 ;; ---------------------------------------------------------------------------
 
 (setq tags-revert-without-query t)       ; reload TAGS silently after a rebuild
@@ -260,15 +263,21 @@ Only the files listed in cscope.files are parsed -- ctags gets the list via `-L'
   (interactive)
   (let ((default-directory (ctags--require-project)))
     (message "Building TAGS from %s ..." src-files)
-    (call-process "ctags" nil "*ctags*" nil
-                  "-e"
-                  "--languages=C,C++"
-                  "--extras=+q"          ; also index qualified names (Class::member)
-                  "--fields=+n"
-                  "-L" (expand-file-name src-files))
+    ;; call-process returns the exit code, or a signal description string.
+    ;; Without this check a missing/failing ctags left a stale TAGS in place
+    ;; and said nothing about it.
+    (let ((rc (call-process "ctags" nil "*ctags*" nil
+                            "-e"
+                            "--languages=C,C++"
+                            "--extras=+q"   ; index qualified names (Class::member)
+                            "--fields=+n"
+                            "-L" (expand-file-name src-files))))
+      (unless (eql rc 0)
+        (display-buffer "*ctags*")
+        (user-error "ctags failed (exit %s) -- see *ctags*" rc)))
     (visit-tags-table (expand-file-name "TAGS" default-directory))
-    (cscope-archive-build)
-    (message "Indexes ready: %sTAGS + %s.txt.gz" default-directory cscope-archive-base)))
+    (csearch-build)
+    (message "Indexes ready: %sTAGS + %s.dat" default-directory csearch-base)))
 
 (defun cscope-archive--search (grep-args)
   "Run `cscope_archive.py search' with GREP-ARGS, showing clickable hits.
@@ -301,9 +310,16 @@ Unlike `ctags-find-references', PATTERN is an extended regexp, not a literal."
    (list (read-string "Search archive: " (thing-at-point 'symbol t))))
   (cscope-archive--search (list "-E" "-e" (shell-quote-argument pattern))))
 
-(global-set-key (kbd "C-c t") 'ctags-build)
-(global-set-key (kbd "C-c r") 'ctags-find-references)
-(global-set-key (kbd "C-c s") 'ctags-search)
+;; C-c t rebuilds the search archive only, after asking whether to refresh
+;; just the files open in Emacs and changed since the last build -- answer
+;; `n' for the full rebuild.  `M-x ctags-build' rebuilds TAGS as well and
+;; then calls csearch-build from Lisp, which is always the full rebuild.
+(global-set-key (kbd "C-c t") 'csearch-build)
+(global-set-key (kbd "C-c r") 'csearch-symbol)
+(global-set-key (kbd "C-c s") 'csearch-pattern)
+;; When a build or search fails, this shows the paths csearch is using,
+;; what the daemon saw, and its stderr.
+(global-set-key (kbd "C-c ?") 'csearch-diagnose)
 ;; `tags-search' walks the files recorded in the loaded TAGS db directly;
 ;; `M-0 M-,' (fileloop-continue) jumps to the next match after the first.
 (global-set-key (kbd "C-c S") 'tags-search)
@@ -322,6 +338,11 @@ Unlike `ctags-find-references', PATTERN is an extended regexp, not a literal."
   ;(setq recentf-list '())
   (setq src-path source-path)
   (setq src-files (concat src-path "cscope.files"))
+  ;; Pin csearch to this project.  Without it csearch guesses the root by
+  ;; walking up from the current buffer, so `C-c t' pressed from a buffer
+  ;; outside the tree rebuilt (or failed to rebuild) somewhere else.  The
+  ;; daemon notices the change and restarts itself in the new root.
+  (setq csearch-root (file-name-as-directory (expand-file-name src-path)))
   (setq cscope-file-list (split-string (slurp src-files)))
   (cscope-set-initial-directory src-path)
   (grep-compute-defaults)
@@ -410,3 +431,5 @@ Unlike `ctags-find-references', PATTERN is an extended regexp, not a literal."
 (global-set-key (kbd "C-c C-l") 'reload-init-file)    ; Reload .emacs file
 
 
+(require 'nav-history)
+(nav-history-mode 1)
