@@ -2,6 +2,24 @@
 (defvar hide-lines-invisible-areas () "List of invisible overlays used by hidelines")
 (defvar hide-lines-active nil "Non-nil while lines are hidden (overview mode).")
 
+(defvar hide-lines-overview-map
+  (let ((map (make-sparse-keymap)))
+    ;; RET expands rather than splitting the line.  While lines are
+    ;; hidden the buffer reads as a list of matches, so a newline typed
+    ;; there is nearly always a misfire.
+    (define-key map (kbd "RET") 'hide-lines-show-all)
+    (define-key map (kbd "<return>") 'hide-lines-show-all)
+    map)
+  "Keymap live only while lines are hidden.")
+
+(define-minor-mode hide-lines-overview-mode
+  "Buffer-local mode active while lines are hidden.
+Rebinds RET to `hide-lines-show-all' so pressing it on a match expands
+the buffer instead of inserting a newline."
+  :init-value nil
+  :lighter " Overview"
+  :keymap hide-lines-overview-map)
+
 (defun hide-lines-not-matching (search-text)
   (set (make-local-variable 'line-move-ignore-invisible) t)
   (setq hide-buff (replace-regexp-in-string "\\([(){}|]\\)" "\\\\\\1" search-text))
@@ -50,6 +68,7 @@ mode lands on the match that was being looked at."
         hide-lines-invisible-areas)
   (setq hide-lines-invisible-areas ())
   (setq hide-lines-active nil)
+  (hide-lines-overview-mode -1)
   ;; Only when this buffer is actually on screen -- `recenter' errors otherwise.
   (if (eq (current-buffer) (window-buffer (selected-window)))
       (recenter)))
@@ -121,6 +140,7 @@ one behind it -- falling back to the last text used."
       (progn
         (funcall func hide-lines-text)
         (setq hide-lines-active t)
+        (hide-lines-overview-mode 1)
         (move-to-column hide-lines-column t)
         (deactivate-mark)))
   )
@@ -143,6 +163,7 @@ letter-by-letter search C-c f runs."
     (setq hide-lines-column (current-column))
     (hide-lines-not-matching hide-lines-text)
     (setq hide-lines-active t)
+    (hide-lines-overview-mode 1)
     ;; point may have been sitting on a line this token hides
     (hide-lines-goto-visible)
     (move-to-column hide-lines-column t)
@@ -161,6 +182,7 @@ letter-by-letter search C-c f runs."
       (hide-lines-matching hide-lines-text)
     (hide-lines-not-matching hide-lines-text))
   (setq hide-lines-active t)
+  (hide-lines-overview-mode 1)
   (move-to-column hide-lines-column t)
   (deactivate-mark))
 
@@ -213,6 +235,7 @@ Expand again with \\[hide-lines-show-all]."
           (if (string= "" text)
               (hide-lines-show-all)
             (setq hide-lines-active t)
+            (hide-lines-overview-mode 1)
             (hide-lines-goto-visible)
             (move-to-column column t)
             (if (eq (current-buffer) (window-buffer (selected-window)))
