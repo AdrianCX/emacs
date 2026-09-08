@@ -126,12 +126,16 @@ one behind it -- falling back to the last text used."
   )
 
 (defun hide-not-matching ()
-  "Overview mode using the last search token, with no prompt.
-Reapplies `hide-lines-text' exactly as it was last used, so this is the
-repeat key.  When no token has been set yet -- a fresh session, or the
-last filter was cleared -- start `hide-lines-filter' instead, the same
+  "Overview mode, with no prompt.  The token comes from, in order:
+the active region, which becomes the new token; else `hide-lines-text'
+as last used, making this the repeat key; else -- a fresh session, or
+the last filter cleared -- `hide-lines-filter', the same
 letter-by-letter search C-c f runs."
   (interactive)
+  ;; read the region before anything below disturbs it
+  (let ((selected (get-selected-text)))
+    (if (and selected (not (string= "" selected)))
+        (setq hide-lines-text selected)))
   (if (or (not hide-lines-text) (string= "" hide-lines-text))
       (hide-lines-filter)
     (if hide-lines-active (hide-lines-show-all))
