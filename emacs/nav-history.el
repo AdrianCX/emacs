@@ -166,11 +166,9 @@ window instead of replacing the current buffer."
       (progn
         (global-set-key (kbd "M-<left>")  #'nav-history-back)
         (global-set-key (kbd "M-<right>") #'nav-history-forward)
-        (global-set-key (kbd "M-<up>")    #'nav-history-show)
         (add-hook 'post-command-hook #'nav-history--track))
     (global-unset-key (kbd "M-<left>"))
     (global-unset-key (kbd "M-<right>"))
-    (global-unset-key (kbd "M-<up>"))
     (remove-hook 'post-command-hook #'nav-history--track)))
 
 (provide 'nav-history)
