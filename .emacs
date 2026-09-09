@@ -53,6 +53,13 @@
 ; shortcuts
 (define-key global-map [(f9)]  'compile)
 
+; Compilation: follow the output as it arrives, but stop at the first error
+(setq compilation-scroll-output 'first-error)
+
+; Compilation: render ANSI color escapes (e.g. ^[[34m^[[1m...^[[0m) as colors
+(require 'ansi-color)
+(add-hook 'compilation-filter-hook 'ansi-color-compilation-filter)
+
 ; Get /path/to/filename in clipboard
 (defun put-file-name-on-clipboard ()
   "Put the current file name on the clipboard"
